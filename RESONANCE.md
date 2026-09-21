@@ -1,14 +1,26 @@
-# Resonance — MVP 0.1.0
+# Resonance — 0.2.0
 
 Local-first Android singing game.
 
-## V1
-- Detects sung pitch locally.
-- Calibrates a comfortable note.
-- Hold, rise +2 semitones, fall -2 semitones.
-- Scores pitch accuracy and stability.
-- Gives deterministic coaching locally.
-- No INTERNET permission.
-- Raw microphone audio is not stored or transmitted.
+## What changed in 0.2
+- Continuous pitch trail: your sung contour is drawn against the target contour.
+- Adaptive levels 1–5 saved locally.
+- Center/hold training with tighter tolerance as the user improves.
+- Glide world: a continuous rising/falling target path.
+- Interval portals that grow with level.
+- Initial vibrato scan: rate, extent and regularity are estimated locally.
+- On-device adaptive coach chooses the next training priority from session metrics.
+- Pitch, stability and glide scores.
+- Local voice range history.
+- Custom Resonance launcher icon.
+- Smaller 2048-sample audio frames for more responsive feedback.
 
-Future versions can add optional on-device models and opt-in OpenAI coaching using derived metrics.
+## Privacy
+- No INTERNET permission.
+- Raw microphone audio is never stored or transmitted.
+- Progress and voice metrics are stored in Android SharedPreferences on-device.
+- No account or cloud dependency.
+
+## AI strategy
+0.2 deliberately keeps the critical loop deterministic and local: DSP + adaptive rules.
+A future opt-in generative coach can use OpenAI from derived metrics, without requiring raw audio upload.
