@@ -73,7 +73,7 @@ public final class MainActivity extends Activity {
         void stop(){ running=false; if(audioThread!=null) audioThread.interrupt(); audioThread=null; }
 
         void audioLoop(){
-            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
             int sr=44100, samples=4096;
             int min=AudioRecord.getMinBufferSize(sr,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT);
             AudioRecord rec=null;
