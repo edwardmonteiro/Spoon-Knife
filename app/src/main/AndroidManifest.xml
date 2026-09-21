@@ -4,6 +4,8 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@drawable/ic_resonance"
+        android:roundIcon="@drawable/ic_resonance"
         android:label="Resonance"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
