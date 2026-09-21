@@ -49,96 +49,119 @@ public final class MainActivity extends Activity {
     final class GameView extends View {
         static final int INTRO = 0;
         static final int CALIBRATE = 1;
-        static final int HOLD = 2;
-        static final int GLIDE = 3;
-        static final int INTERVAL = 4;
-        static final int VIBRATO = 5;
-        static final int RESULT = 6;
+        static final int CENTER = 2;
+        static final int SONG = 3;
+        static final int VIBRATO = 4;
+        static final int RESULT = 5;
 
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
         final RectF action = new RectF();
-        final ArrayDeque<Double> hzMedian = new ArrayDeque<>();
-        final ArrayDeque<Frame> trail = new ArrayDeque<>();
-        final ArrayList<Double> calibration = new ArrayList<>();
-        final ArrayList<Double> errors = new ArrayList<>();
-        final ArrayList<Double> holdErrors = new ArrayList<>();
-        final ArrayList<Double> glideErrors = new ArrayList<>();
-        final VoiceMetrics metrics = new VoiceMetrics();
-        final String[] noteNames = {"C","C♯","D","D♯","E","F","F♯","G","G♯","A","A♯","B"};
 
+        final ArrayDeque<Double> hzMedian = new ArrayDeque<>();
+        final ArrayDeque<SungFrame> songTrail = new ArrayDeque<>();
+        final ArrayList<Double> calibration = new ArrayList<>();
+        final ArrayList<Double> centerErrors = new ArrayList<>();
+        final ArrayList<Double> songErrors = new ArrayList<>();
+        final ArrayList<Double> phraseErrors = new ArrayList<>();
+        final ArrayList<Integer> phraseScores = new ArrayList<>();
+        final ArrayList<Integer> phraseSyncScores = new ArrayList<>();
+
+        final VoiceMetrics metrics = new VoiceMetrics();
         final SharedPreferences prefs = getSharedPreferences("resonance_local", 0);
+        final String[] noteNames = {"C","C♯","D","D♯","E","F","F♯","G","G♯","A","A♯","B"};
 
         volatile boolean running = false;
         Thread audioThread;
 
         int stage = INTRO;
-        int level = 1;
-        int nextLevel = 1;
-        int intervalIndex = 0;
-        int score = 0;
-        int pitchScore = 0;
-        int stabilityScore = 0;
-        int glideScore = 0;
-        int voicedVibratoFrames = 0;
+        int level;
+        int nextLevel;
+        int score;
+        int pitchScore;
+        int stabilityScore;
+        int songScore;
+        int syncScore;
+        int phraseIndex;
+        int sessionNumber;
 
-        double hz = 0;
+        double hz;
         double midi = 60;
         double rawMidi = 60;
         double base = 60;
         double target = 60;
-        double confidence = 0;
-        double goodMs = 0;
+        double confidence;
+        double centerGoodMs;
         double observedMin = 200;
         double observedMax = 0;
-        double vibratoRate = 0;
-        double vibratoExtent = 0;
-        double vibratoRegularity = 0;
-        boolean vibratoDetected = false;
+        double vibratoRate;
+        double vibratoExtent;
+        double vibratoRegularity;
+        boolean vibratoDetected;
 
-        long voicedAt = 0;
-        long stageStartedAt = 0;
-        long lastPitchAt = 0;
-        long lastAcceptedAt = 0;
+        long voicedAt;
+        long lastPitchAt;
+        long lastAcceptedAt;
+        long stageStartedAt;
+
+        long phraseStartAt;
+        long phraseEndAt;
+        long phraseResultUntil;
+        long phraseVoicedMs;
+        long phraseInSyncMs;
 
         String message = "Sua voz fica no aparelho.";
         String coach = "O coach adaptativo aprende apenas com métricas locais.";
+        String phraseMoment = "";
+
+        SongPathEngine song;
 
         GameView() {
             super(MainActivity.this);
             setBackgroundColor(Color.rgb(9, 9, 10));
             setClickable(true);
             stroke.setStyle(Paint.Style.STROKE);
-            level = Math.max(1, Math.min(5, prefs.getInt("level", 1)));
+            level = clampLevel(prefs.getInt("level", 1));
         }
 
         void startSession() {
             stopAudio();
-            level = Math.max(1, Math.min(5, prefs.getInt("level", 1)));
+
+            level = clampLevel(prefs.getInt("level", 1));
             nextLevel = level;
+            sessionNumber = prefs.getInt("session_count", 0);
+
             stage = CALIBRATE;
-            score = pitchScore = stabilityScore = glideScore = 0;
+            score = pitchScore = stabilityScore = songScore = syncScore = 0;
+            phraseIndex = 0;
+
             hz = 0;
             midi = rawMidi = 60;
-            confidence = goodMs = 0;
-            voicedAt = lastPitchAt = lastAcceptedAt = 0;
+            base = target = 60;
+            confidence = 0;
+            centerGoodMs = 0;
             observedMin = 200;
             observedMax = 0;
-            intervalIndex = 0;
-            voicedVibratoFrames = 0;
             vibratoRate = vibratoExtent = vibratoRegularity = 0;
             vibratoDetected = false;
 
+            voicedAt = lastPitchAt = lastAcceptedAt = 0;
+            phraseStartAt = phraseEndAt = phraseResultUntil = 0;
+            phraseVoicedMs = phraseInSyncMs = 0;
+
             calibration.clear();
-            errors.clear();
-            holdErrors.clear();
-            glideErrors.clear();
+            centerErrors.clear();
+            songErrors.clear();
+            phraseErrors.clear();
+            phraseScores.clear();
+            phraseSyncScores.clear();
             hzMedian.clear();
-            trail.clear();
+            songTrail.clear();
             metrics.resetVibrato();
 
             message = "Cante uma nota confortável. Sem força.";
             coach = "Pare se sentir dor ou esforço.";
+            phraseMoment = "";
             stageStartedAt = System.currentTimeMillis();
 
             running = true;
@@ -159,6 +182,7 @@ public final class MainActivity extends Activity {
             final int samples = 2048;
             int minBuffer = AudioRecord.getMinBufferSize(
                     sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+
             AudioRecord recorder = null;
             try {
                 recorder = new AudioRecord(
@@ -167,6 +191,7 @@ public final class MainActivity extends Activity {
                         AudioFormat.CHANNEL_IN_MONO,
                         AudioFormat.ENCODING_PCM_16BIT,
                         Math.max(minBuffer, samples * 6));
+
                 if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
                     post(() -> {
                         message = "Não consegui iniciar o microfone.";
@@ -203,12 +228,13 @@ public final class MainActivity extends Activity {
             long now = System.currentTimeMillis();
             if (stage == INTRO || stage == RESULT) return;
 
+            updateTimed(now);
+
             if (result.frequency <= 0) {
                 if (now - lastPitchAt > 260) {
                     hz = 0;
                     if (stage == CALIBRATE) voicedAt = 0;
                 }
-                updateTimedStages(now);
                 invalidate();
                 return;
             }
@@ -224,7 +250,7 @@ public final class MainActivity extends Activity {
             hz = ordered.get(ordered.size() / 2);
             midi = frequencyToMidi(hz);
 
-            long frameMs = lastAcceptedAt == 0 ? 46 : Math.max(20, Math.min(110, now - lastAcceptedAt));
+            long frameMs = lastAcceptedAt == 0 ? 46 : Math.max(20, Math.min(100, now - lastAcceptedAt));
             lastAcceptedAt = now;
 
             observedMin = Math.min(observedMin, midi);
@@ -232,33 +258,14 @@ public final class MainActivity extends Activity {
 
             if (stage == CALIBRATE) {
                 handleCalibration(now);
-                invalidate();
-                return;
-            }
-
-            target = currentTarget(now);
-            double cents = (midi - target) * 100.0;
-            addTrail(midi, target);
-
-            if (stage == HOLD) {
-                errors.add(cents);
-                holdErrors.add(cents);
-                updateGoodTime(cents, frameMs, toleranceCents());
-                if (goodMs >= 1600) enterStage(GLIDE, now);
-            } else if (stage == GLIDE) {
-                glideErrors.add(cents);
-                if (Math.abs(cents) < 140) errors.add(cents);
-            } else if (stage == INTERVAL) {
-                errors.add(cents);
-                updateGoodTime(cents, frameMs, toleranceCents());
-                if (goodMs >= 650) advanceInterval(now);
+            } else if (stage == CENTER) {
+                handleCenter(frameMs, now);
+            } else if (stage == SONG) {
+                handleSong(frameMs, now);
             } else if (stage == VIBRATO) {
-                errors.add(cents);
-                voicedVibratoFrames++;
-                metrics.addVibratoSample(now, (rawMidi - base) * 100.0);
+                handleVibrato(now);
             }
 
-            updateTimedStages(now);
             invalidate();
         }
 
@@ -267,32 +274,141 @@ public final class MainActivity extends Activity {
             if (voicedAt == 0) voicedAt = now;
             calibration.add(rawMidi);
 
-            if (now - voicedAt >= 2300 && calibration.size() >= 24) {
+            if (now - voicedAt >= 2200 && calibration.size() >= 22) {
                 ArrayList<Double> sorted = new ArrayList<>(calibration);
                 Collections.sort(sorted);
-                double median = sorted.get(sorted.size() / 2);
-                base = Math.rint(median);
+                base = Math.rint(sorted.get(sorted.size() / 2));
                 target = base;
-                observedMin = Math.min(observedMin, median);
-                observedMax = Math.max(observedMax, median);
-                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-                enterStage(HOLD, now);
+                observedMin = Math.min(observedMin, base);
+                observedMax = Math.max(observedMax, base);
+                enterCenter(now);
             }
         }
 
-        void updateGoodTime(double cents, long frameMs, double tolerance) {
-            if (Math.abs(cents) <= tolerance && confidence >= 0.62) {
-                goodMs += frameMs;
+        void enterCenter(long now) {
+            stage = CENTER;
+            stageStartedAt = now;
+            centerGoodMs = 0;
+            message = "Segure " + note(base) + " no centro.";
+            coach = "Essa nota será o centro das melodias.";
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        }
+
+        void handleCenter(long frameMs, long now) {
+            target = base;
+            double cents = (midi - target) * 100.0;
+            centerErrors.add(cents);
+
+            if (Math.abs(cents) <= toleranceCents() && confidence >= 0.62) {
+                centerGoodMs += frameMs;
             } else {
-                goodMs = Math.max(0, goodMs - frameMs * 0.7);
+                centerGoodMs = Math.max(0, centerGoodMs - frameMs * 0.7);
+            }
+
+            if (centerGoodMs >= 1500) enterSong(now);
+        }
+
+        void enterSong(long now) {
+            stage = SONG;
+            stageStartedAt = now;
+            song = SongPathEngine.create(level, sessionNumber);
+            phraseIndex = 0;
+            phraseScores.clear();
+            phraseSyncScores.clear();
+            beginPhrase(now);
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        }
+
+        void beginPhrase(long now) {
+            long countIn = song.countInMs(phraseIndex);
+            phraseStartAt = now + countIn;
+            phraseEndAt = phraseStartAt + song.durationMs(phraseIndex);
+            phraseResultUntil = 0;
+            phraseVoicedMs = 0;
+            phraseInSyncMs = 0;
+            phraseErrors.clear();
+            songTrail.clear();
+            phraseMoment = "";
+
+            SongPathEngine.Phrase phrase = song.phrase(phraseIndex);
+            message = "PHRASE " + (phraseIndex + 1) + "/" + song.phraseCount() + " · " + phrase.name;
+            coach = "Cante em “ah”. Faça sua linha encontrar a linha-alvo.";
+        }
+
+        void handleSong(long frameMs, long now) {
+            if (phraseResultUntil > 0 || now < phraseStartAt || now >= phraseEndAt) return;
+
+            target = song.targetMidi(base, phraseIndex, now - phraseStartAt);
+            double cents = (midi - target) * 100.0;
+
+            phraseVoicedMs += frameMs;
+            phraseErrors.add(cents);
+            songErrors.add(cents);
+
+            if (Math.abs(cents) <= songToleranceCents()) phraseInSyncMs += frameMs;
+
+            songTrail.addLast(new SungFrame(now, midi));
+            while (!songTrail.isEmpty() && now - songTrail.peekFirst().timeMs > 5200) {
+                songTrail.removeFirst();
             }
         }
 
-        void updateTimedStages(long now) {
-            long elapsed = now - stageStartedAt;
-            if (stage == GLIDE && elapsed >= glideDurationMs()) {
-                enterStage(INTERVAL, now);
-            } else if (stage == VIBRATO && elapsed >= 5200) {
+        void finishPhrase(long now) {
+            double meanAbs = VoiceMetrics.meanAbsolute(phraseErrors, 120);
+            double accuracy = VoiceMetrics.clamp(100 - meanAbs * 0.95, 0, 100);
+            double coverage = VoiceMetrics.clamp(
+                    100.0 * phraseVoicedMs / Math.max(1, song.durationMs(phraseIndex)), 0, 100);
+            double sync = phraseVoicedMs > 0
+                    ? VoiceMetrics.clamp(100.0 * phraseInSyncMs / phraseVoicedMs, 0, 100)
+                    : 0;
+
+            int phraseScore = (int)Math.round(accuracy * 0.58 + sync * 0.27 + coverage * 0.15);
+            int phraseSync = (int)Math.round(sync);
+            phraseScores.add(phraseScore);
+            phraseSyncScores.add(phraseSync);
+
+            boolean perfect = phraseScore >= 88 && phraseSync >= 72 && coverage >= 72;
+            phraseMoment = perfect
+                    ? "PERFECT SYNC"
+                    : "SYNC " + String.format(Locale.US, "%02d", phraseSync);
+
+            phraseResultUntil = now + 1200;
+            performHapticFeedback(perfect
+                    ? HapticFeedbackConstants.LONG_PRESS
+                    : HapticFeedbackConstants.KEYBOARD_TAP);
+        }
+
+        void advanceSong(long now) {
+            phraseIndex++;
+            if (phraseIndex >= song.phraseCount()) {
+                enterVibrato(now);
+            } else {
+                beginPhrase(now);
+            }
+        }
+
+        void enterVibrato(long now) {
+            stage = VIBRATO;
+            stageStartedAt = now;
+            target = base;
+            metrics.resetVibrato();
+            message = "Sustente " + note(base) + ". Deixe a voz oscilar naturalmente.";
+            coach = "Não force vibrato. Ele não aumenta seu score nesta versão.";
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        }
+
+        void handleVibrato(long now) {
+            metrics.addVibratoSample(now, (rawMidi - base) * 100.0);
+        }
+
+        void updateTimed(long now) {
+            if (stage == SONG) {
+                if (phraseResultUntil > 0) {
+                    if (now >= phraseResultUntil) advanceSong(now);
+                } else if (now >= phraseEndAt && phraseEndAt > 0) {
+                    finishPhrase(now);
+                }
+            } else if (stage == VIBRATO && now - stageStartedAt >= 4600) {
                 VoiceMetrics.Vibrato v = metrics.analyzeVibrato();
                 vibratoRate = v.rateHz;
                 vibratoExtent = v.extentCents;
@@ -302,117 +418,60 @@ public final class MainActivity extends Activity {
             }
         }
 
-        void enterStage(int newStage, long now) {
-            stage = newStage;
-            stageStartedAt = now;
-            goodMs = 0;
-
-            if (newStage == HOLD) {
-                target = base;
-                message = "Segure " + note(base) + " no centro.";
-                coach = "Quanto mais estável a linha, melhor.";
-            } else if (newStage == GLIDE) {
-                message = "Siga a linha: suba e desça sem aumentar a força.";
-                coach = "Sua voz é o controle do jogo.";
-            } else if (newStage == INTERVAL) {
-                intervalIndex = 0;
-                target = intervalTarget();
-                message = "Acerte os portais, um de cada vez.";
-                coach = "Chegue perto da nota antes de aumentar o volume.";
-            } else if (newStage == VIBRATO) {
-                target = base;
-                metrics.resetVibrato();
-                voicedVibratoFrames = 0;
-                message = "Sustente " + note(base) + ". Deixe a voz oscilar naturalmente.";
-                coach = "Não force vibrato. O app apenas mede o que aparecer.";
-            }
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-        }
-
-        void advanceInterval(long now) {
-            intervalIndex++;
-            goodMs = 0;
-            int[] pattern = intervalPattern();
-            if (intervalIndex >= pattern.length) {
-                enterStage(VIBRATO, now);
-            } else {
-                target = intervalTarget();
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-            }
-        }
-
-        int[] intervalPattern() {
-            int step = Math.min(5, level + 1);
-            return new int[]{0, step, 0, -step, 0};
-        }
-
-        double intervalTarget() {
-            int[] pattern = intervalPattern();
-            int index = Math.max(0, Math.min(pattern.length - 1, intervalIndex));
-            return base + pattern[index];
-        }
-
-        long glideDurationMs() {
-            return 7800;
-        }
-
-        double currentTarget(long now) {
-            if (stage == HOLD || stage == VIBRATO) return base;
-            if (stage == INTERVAL) return intervalTarget();
-            if (stage == GLIDE) {
-                double progress = VoiceMetrics.clamp((now - stageStartedAt) / (double)glideDurationMs(), 0, 1);
-                double span = Math.min(5.0, 2.0 + level);
-                return base + span * Math.sin(progress * Math.PI * 2.0);
-            }
-            return base;
-        }
-
-        double toleranceCents() {
-            return Math.max(26, 50 - (level - 1) * 6);
-        }
-
         void finishSession() {
             stage = RESULT;
             stopAudio();
 
-            double meanAbs = VoiceMetrics.meanAbsolute(errors, 85);
-            double meanSigned = VoiceMetrics.mean(errors, 0);
-            double stabilitySd = VoiceMetrics.standardDeviation(holdErrors);
-            double glideMean = VoiceMetrics.meanAbsolute(glideErrors, 100);
+            double songMeanAbs = VoiceMetrics.meanAbsolute(songErrors, 100);
+            double songSigned = VoiceMetrics.mean(songErrors, 0);
+            double stabilitySd = VoiceMetrics.standardDeviation(centerErrors);
 
-            pitchScore = (int)Math.round(VoiceMetrics.clamp(100 - meanAbs * 1.05, 0, 100));
-            stabilityScore = (int)Math.round(VoiceMetrics.clamp(100 - Math.max(0, stabilitySd - 7) * 1.55, 0, 100));
-            glideScore = (int)Math.round(VoiceMetrics.clamp(100 - glideMean * 0.72, 0, 100));
-            score = (int)Math.round(pitchScore * 0.46 + stabilityScore * 0.30 + glideScore * 0.24);
+            pitchScore = (int)Math.round(VoiceMetrics.clamp(100 - songMeanAbs * 0.90, 0, 100));
+            stabilityScore = (int)Math.round(
+                    VoiceMetrics.clamp(100 - Math.max(0, stabilitySd - 7) * 1.55, 0, 100));
+            songScore = averageInt(phraseScores);
+            syncScore = averageInt(phraseSyncScores);
+
+            score = (int)Math.round(
+                    pitchScore * 0.25
+                    + stabilityScore * 0.20
+                    + songScore * 0.40
+                    + syncScore * 0.15);
 
             nextLevel = level;
-            if (score >= 78 && stabilityScore >= 55 && level < 5) nextLevel = level + 1;
+            if (score >= 78 && songScore >= 72 && syncScore >= 58 && level < 5) {
+                nextLevel = level + 1;
+            }
 
-            if (meanSigned < -18) {
-                coach = "Você tende a chegar por baixo. Mire no centro antes de sustentar.";
-            } else if (meanSigned > 18) {
-                coach = "Você tende a chegar acima. Ataque mais leve e encontre o centro.";
+            if (songSigned < -18) {
+                coach = "Você segue a melodia, mas costuma chegar por baixo das notas.";
+            } else if (songSigned > 18) {
+                coach = "Você costuma chegar acima. Entre nas notas com menos impulso.";
             } else if (stabilityScore < 55) {
-                coach = "Seu principal treino agora é estabilidade, não extensão.";
-            } else if (glideScore < 55) {
-                coach = "Subidas e descidas contínuas ainda são seu maior gargalo.";
+                coach = "A melodia está vindo. Seu maior ganho agora está em sustentar o centro.";
+            } else if (syncScore < 55) {
+                coach = "Você encontra as notas, mas passa pouco tempo exatamente sobre a trilha.";
+            } else if (songScore < 68) {
+                coach = "Treine a forma da frase inteira, não cada nota isoladamente.";
             } else if (vibratoDetected) {
-                coach = "Vibrato detectado. Preserve a regularidade sem forçar amplitude.";
+                coach = "Bom controle melódico. Vibrato natural detectado sem precisar forçar.";
             } else {
-                coach = "Bom controle central. O próximo treino pode ampliar os intervalos.";
+                coach = "Boa leitura da trilha. A próxima sessão aumenta a complexidade melódica.";
             }
 
             message = nextLevel > level
                     ? "LEVEL " + String.format(Locale.US, "%02d", nextLevel) + " UNLOCKED"
-                    : "Sessão concluída · coach atualizado";
+                    : "Sessão concluída · perfil vocal atualizado";
 
             int best = Math.max(score, prefs.getInt("best", 0));
             prefs.edit()
                     .putInt("best", best)
                     .putInt("level", nextLevel)
+                    .putInt("session_count", sessionNumber + 1)
+                    .putInt("last_song_score", songScore)
+                    .putInt("last_sync_score", syncScore)
                     .putFloat("last_pitch", pitchScore)
                     .putFloat("last_stability", stabilityScore)
-                    .putFloat("last_glide", glideScore)
                     .putFloat("range_low", (float)(observedMin < 150 ? observedMin : base))
                     .putFloat("range_high", (float)(observedMax > 0 ? observedMax : base))
                     .putFloat("vibrato_rate", (float)vibratoRate)
@@ -422,22 +481,27 @@ public final class MainActivity extends Activity {
             invalidate();
         }
 
-        void addTrail(double sung, double wanted) {
-            trail.addLast(new Frame(sung, wanted));
-            while (trail.size() > 150) trail.removeFirst();
-        }
-
-        String liveHint() {
-            if (hz <= 0 || stage == CALIBRATE || stage == RESULT) return "";
-            double cents = (midi - target) * 100.0;
-            if (cents < -70) return "ABAIXO · suba um pouco";
-            if (cents > 70) return "ACIMA · desça um pouco";
-            if (Math.abs(cents) <= toleranceCents()) return "CENTERED";
-            return "aproxime a linha do alvo";
+        int averageInt(ArrayList<Integer> values) {
+            if (values.isEmpty()) return 0;
+            int sum = 0;
+            for (int v : values) sum += v;
+            return Math.round(sum / (float) values.size());
         }
 
         double frequencyToMidi(double frequency) {
             return 69.0 + 12.0 * (Math.log(frequency / 440.0) / Math.log(2.0));
+        }
+
+        double toleranceCents() {
+            return Math.max(26, 48 - (level - 1) * 5);
+        }
+
+        double songToleranceCents() {
+            return Math.max(34, 58 - (level - 1) * 5);
+        }
+
+        int clampLevel(int value) {
+            return Math.max(1, Math.min(5, value));
         }
 
         String note(double midiValue) {
@@ -448,10 +512,20 @@ public final class MainActivity extends Activity {
         }
 
         float yFor(double midiValue, float top, float bottom) {
-            double center = base;
-            double range = 7.0;
-            double relative = VoiceMetrics.clamp((midiValue - center) / range, -1, 1);
+            double range = 8.0;
+            double relative = VoiceMetrics.clamp((midiValue - base) / range, -1, 1);
             return (float)((top + bottom) / 2.0 - relative * (bottom - top) * 0.46);
+        }
+
+        float xForTime(long absoluteTime, long now, float left, float playhead, float right) {
+            long delta = absoluteTime - now;
+            if (delta <= 0) {
+                double p = VoiceMetrics.clamp((-delta) / 2600.0, 0, 1);
+                return (float)(playhead - p * (playhead - left));
+            } else {
+                double p = VoiceMetrics.clamp(delta / 5600.0, 0, 1);
+                return (float)(playhead + p * (right - playhead));
+            }
         }
 
         void drawText(Canvas canvas, String text, float x, float y, float size, int color, Paint.Align align) {
@@ -463,70 +537,123 @@ public final class MainActivity extends Activity {
             canvas.drawText(text, x, y, paint);
         }
 
-        void drawPitchWorld(Canvas canvas, float left, float right, float top, float bottom) {
+        void drawSongWorld(Canvas canvas, float left, float right, float top, float bottom, long now) {
             float width = right - left;
+            float playhead = left + width * 0.34f;
 
-            for (int offset = -6; offset <= 6; offset++) {
+            for (int offset = -7; offset <= 7; offset++) {
                 float y = yFor(base + offset, top, bottom);
-                stroke.setStrokeWidth(dp(offset == 0 ? 1.1f : 0.65f));
-                stroke.setColor(offset == 0 ? Color.rgb(54,54,61) : Color.rgb(29,29,34));
+                stroke.setStrokeWidth(dp(offset == 0 ? 1.0f : 0.55f));
+                stroke.setColor(offset == 0 ? Color.rgb(51,51,59) : Color.rgb(27,27,32));
                 canvas.drawLine(left, y, right, y, stroke);
-                if (offset % 2 == 0) {
-                    drawText(canvas, note(base + offset), left, y - dp(4), dp(9),
-                            Color.rgb(76,76,86), Paint.Align.LEFT);
-                }
             }
 
-            if (!trail.isEmpty()) {
+            stroke.setStrokeWidth(dp(1));
+            stroke.setColor(Color.rgb(72,72,82));
+            canvas.drawLine(playhead, top, playhead, bottom, stroke);
+
+            if (song != null && phraseIndex < song.phraseCount()) {
                 Path targetPath = new Path();
-                Path sungPath = new Path();
-                int size = trail.size();
-                int i = 0;
-                for (Frame frame : trail) {
-                    float x = left + (size <= 1 ? width : width * i / (float)(size - 1));
-                    float sy = yFor(frame.sungMidi, top, bottom);
-                    float ty = yFor(frame.targetMidi, top, bottom);
-                    if (i == 0) {
-                        targetPath.moveTo(x, ty);
-                        sungPath.moveTo(x, sy);
+                boolean started = false;
+
+                long from = Math.max(phraseStartAt, now - 2600);
+                long to = Math.min(phraseEndAt, now + 5600);
+
+                for (long t = from; t <= to; t += 70) {
+                    float x = xForTime(t, now, left, playhead, right);
+                    double targetMidi = song.targetMidi(base, phraseIndex, t - phraseStartAt);
+                    float y = yFor(targetMidi, top, bottom);
+                    if (!started) {
+                        targetPath.moveTo(x, y);
+                        started = true;
                     } else {
-                        targetPath.lineTo(x, ty);
-                        sungPath.lineTo(x, sy);
+                        targetPath.lineTo(x, y);
                     }
-                    i++;
                 }
 
                 stroke.setStyle(Paint.Style.STROKE);
-                stroke.setStrokeWidth(dp(1.15f));
-                stroke.setColor(Color.rgb(92,92,103));
+                stroke.setStrokeWidth(dp(2.2f));
+                stroke.setStrokeCap(Paint.Cap.ROUND);
+                stroke.setStrokeJoin(Paint.Join.ROUND);
+                stroke.setColor(Color.rgb(105,105,116));
                 canvas.drawPath(targetPath, stroke);
 
-                stroke.setStrokeWidth(dp(2.25f));
-                stroke.setColor(Color.rgb(231,231,235));
+                Path sungPath = new Path();
+                started = false;
+                for (SungFrame frame : songTrail) {
+                    float x = xForTime(frame.timeMs, now, left, playhead, right);
+                    if (x < left || x > right) continue;
+                    float y = yFor(frame.midi, top, bottom);
+                    if (!started) {
+                        sungPath.moveTo(x, y);
+                        started = true;
+                    } else {
+                        sungPath.lineTo(x, y);
+                    }
+                }
+
+                stroke.setStrokeWidth(dp(2.8f));
+                stroke.setColor(Color.rgb(239,239,242));
                 canvas.drawPath(sungPath, stroke);
-            }
 
-            if (stage >= HOLD && stage <= VIBRATO) {
-                target = currentTarget(System.currentTimeMillis());
-                float ty = yFor(target, top, bottom);
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dp(1.4f));
-                paint.setColor(Color.rgb(190,190,199));
-                canvas.drawCircle(right - dp(18), ty, dp(17), paint);
+                if (hz > 0 && now >= phraseStartAt && now < phraseEndAt && phraseResultUntil == 0) {
+                    target = song.targetMidi(base, phraseIndex, now - phraseStartAt);
+                    float voiceY = yFor(midi, top, bottom);
+                    float targetY = yFor(target, top, bottom);
 
-                if (hz > 0) {
-                    float sy = yFor(midi, top, bottom);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(dp(1.3f));
+                    paint.setColor(Color.rgb(178,178,187));
+                    canvas.drawCircle(playhead, targetY, dp(15), paint);
+
                     paint.setStyle(Paint.Style.FILL);
-                    paint.setColor(Color.rgb(245,245,247));
-                    canvas.drawCircle(right - dp(18), sy, dp(5.5f), paint);
+                    paint.setColor(Color.rgb(248,248,250));
+                    canvas.drawCircle(playhead, voiceY, dp(5.5f), paint);
+                }
+
+                if (now < phraseStartAt) {
+                    long beat = song.beatMs(phraseIndex);
+                    int count = (int)Math.ceil((phraseStartAt - now) / (double)beat);
+                    drawText(canvas, String.valueOf(Math.max(1, count)), playhead, (top+bottom)/2,
+                            dp(54), Color.rgb(228,228,232), Paint.Align.CENTER);
+                }
+
+                if (phraseResultUntil > now && !phraseMoment.isEmpty()) {
+                    drawText(canvas, phraseMoment, playhead, (top+bottom)/2,
+                            dp(25), Color.rgb(235,235,239), Paint.Align.CENTER);
+                    int lastScore = phraseScores.isEmpty() ? 0 : phraseScores.get(phraseScores.size()-1);
+                    drawText(canvas, "PHRASE " + lastScore, playhead, (top+bottom)/2 + dp(32),
+                            dp(10), Color.rgb(112,112,123), Paint.Align.CENTER);
                 }
             }
+        }
+
+        void drawCenterWorld(Canvas canvas, float left, float right, float top, float bottom) {
+            float centerY = yFor(base, top, bottom);
+            stroke.setStrokeWidth(dp(1));
+            stroke.setColor(Color.rgb(52,52,60));
+            canvas.drawLine(left, centerY, right, centerY, stroke);
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.5f));
+            paint.setColor(Color.rgb(186,186,195));
+            canvas.drawCircle((left+right)/2, centerY, dp(30), paint);
+
+            if (hz > 0) {
+                float voiceY = yFor(midi, top, bottom);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(Color.rgb(243,243,246));
+                canvas.drawCircle((left+right)/2, voiceY, dp(7), paint);
+            }
+
+            drawText(canvas, note(base), (left+right)/2, centerY - dp(48), dp(11),
+                    Color.rgb(122,122,133), Paint.Align.CENTER);
         }
 
         void drawMetric(Canvas canvas, String label, int value, float left, float right, float y) {
             drawText(canvas, label, left, y, dp(10), Color.rgb(112,112,123), Paint.Align.LEFT);
             drawText(canvas, String.format(Locale.US, "%02d", value), right, y, dp(10),
-                    Color.rgb(200,200,207), Paint.Align.RIGHT);
+                    Color.rgb(202,202,209), Paint.Align.RIGHT);
 
             float barTop = y + dp(8);
             paint.setStyle(Paint.Style.FILL);
@@ -540,84 +667,99 @@ public final class MainActivity extends Activity {
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
 
+            long now = System.currentTimeMillis();
+            updateTimed(now);
+
             float w = getWidth();
             float h = getHeight();
             float left = dp(26);
             float right = w - dp(26);
-            float worldTop = dp(100);
-            float worldBottom = h - dp(240);
+            float worldTop = dp(92);
+            float worldBottom = h - dp(245);
 
             drawText(canvas, "RESONANCE", left, dp(42), dp(13),
                     Color.rgb(225,225,229), Paint.Align.LEFT);
-            drawText(canvas, "LEVEL " + String.format(Locale.US, "%02d", level), right, dp(42), dp(11),
-                    Color.rgb(120,120,130), Paint.Align.RIGHT);
+            drawText(canvas, "0.3 · LEVEL " + String.format(Locale.US, "%02d", level),
+                    right, dp(42), dp(10), Color.rgb(115,115,126), Paint.Align.RIGHT);
 
             if (stage == INTRO) {
-                drawText(canvas, "VOICE", w/2, h*0.37f, dp(58),
+                drawText(canvas, "SONG PATH", w/2, h*0.35f, dp(44),
                         Color.rgb(239,239,242), Paint.Align.CENTER);
-                drawText(canvas, "move your voice · move the world", w/2, h*0.37f + dp(38), dp(11),
-                        Color.rgb(105,105,116), Paint.Align.CENTER);
+                drawText(canvas, "make two lines become one", w/2, h*0.35f + dp(39), dp(11),
+                        Color.rgb(104,104,115), Paint.Align.CENTER);
+
                 int best = prefs.getInt("best", 0);
                 if (best > 0) {
-                    drawText(canvas, "BEST " + best, w/2, h*0.37f + dp(72), dp(10),
-                            Color.rgb(85,85,95), Paint.Align.CENTER);
+                    drawText(canvas, "BEST " + best + " · " + "LEVEL " + level,
+                            w/2, h*0.35f + dp(75), dp(10),
+                            Color.rgb(82,82,92), Paint.Align.CENTER);
                 }
             } else if (stage == CALIBRATE) {
-                drawText(canvas, hz > 0 ? note(midi) : "—", w/2, h*0.36f, dp(58),
+                drawText(canvas, hz > 0 ? note(midi) : "—", w/2, h*0.35f, dp(58),
                         Color.rgb(239,239,242), Paint.Align.CENTER);
-                drawText(canvas, "FIND YOUR CENTER", w/2, h*0.36f + dp(42), dp(10),
+                drawText(canvas, "FIND YOUR CENTER", w/2, h*0.35f + dp(43), dp(10),
                         Color.rgb(105,105,116), Paint.Align.CENTER);
-            } else if (stage == RESULT) {
-                drawText(canvas, String.format(Locale.US, "%02d", score), w/2, dp(186), dp(76),
-                        Color.rgb(240,240,243), Paint.Align.CENTER);
-                drawText(canvas, "VOICE CONTROL", w/2, dp(220), dp(10),
-                        Color.rgb(108,108,118), Paint.Align.CENTER);
+            } else if (stage == CENTER) {
+                drawCenterWorld(canvas, left, right, worldTop, worldBottom);
+                drawText(canvas, "WARM UP · CENTER", left, worldBottom + dp(39), dp(10),
+                        Color.rgb(90,90,101), Paint.Align.LEFT);
+                drawWrapped(canvas, message, left, right, worldBottom + dp(65), dp(13),
+                        Color.rgb(203,203,210));
+            } else if (stage == SONG) {
+                drawSongWorld(canvas, left, right, worldTop, worldBottom, now);
+                drawText(canvas, message, left, worldBottom + dp(38), dp(10),
+                        Color.rgb(111,111,122), Paint.Align.LEFT);
 
-                drawMetric(canvas, "PITCH", pitchScore, left, right, dp(270));
-                drawMetric(canvas, "STABILITY", stabilityScore, left, right, dp(314));
-                drawMetric(canvas, "GLIDE", glideScore, left, right, dp(358));
+                if (phraseResultUntil == 0 && now >= phraseStartAt && now < phraseEndAt && hz > 0) {
+                    target = song.targetMidi(base, phraseIndex, now - phraseStartAt);
+                    double cents = (midi - target) * 100.0;
+                    String live = Math.abs(cents) <= songToleranceCents()
+                            ? "SYNC"
+                            : (cents < 0 ? "LOW · RISE" : "HIGH · LOWER");
+                    drawText(canvas, live, left, worldBottom + dp(67), dp(11),
+                            Color.rgb(190,190,198), Paint.Align.LEFT);
+                    drawText(canvas, String.format(Locale.US, "%+.0f cents", cents),
+                            right, worldBottom + dp(67), dp(10),
+                            Color.rgb(106,106,117), Paint.Align.RIGHT);
+                }
+
+                drawText(canvas, coach, left, worldBottom + dp(100), dp(10),
+                        Color.rgb(82,82,93), Paint.Align.LEFT);
+            } else if (stage == VIBRATO) {
+                drawCenterWorld(canvas, left, right, worldTop, worldBottom);
+                drawText(canvas, "VIBRATO SCAN · OPTIONAL", left, worldBottom + dp(39), dp(10),
+                        Color.rgb(90,90,101), Paint.Align.LEFT);
+                drawWrapped(canvas, message, left, right, worldBottom + dp(65), dp(13),
+                        Color.rgb(203,203,210));
+            } else if (stage == RESULT) {
+                drawText(canvas, String.format(Locale.US, "%02d", score), w/2, dp(170), dp(70),
+                        Color.rgb(240,240,243), Paint.Align.CENTER);
+                drawText(canvas, "SESSION SCORE", w/2, dp(204), dp(10),
+                        Color.rgb(105,105,116), Paint.Align.CENTER);
+
+                drawMetric(canvas, "SONG PATH", songScore, left, right, dp(255));
+                drawMetric(canvas, "PITCH", pitchScore, left, right, dp(299));
+                drawMetric(canvas, "STABILITY", stabilityScore, left, right, dp(343));
+                drawMetric(canvas, "SYNC", syncScore, left, right, dp(387));
 
                 String vibratoText = vibratoDetected
                         ? String.format(Locale.US, "VIBRATO %.1f Hz · %.0f cents", vibratoRate, vibratoExtent)
-                        : "VIBRATO · ainda não consistente";
-                drawText(canvas, vibratoText, left, dp(410), dp(10),
-                        Color.rgb(112,112,123), Paint.Align.LEFT);
+                        : "VIBRATO · not yet consistent";
+                drawText(canvas, vibratoText, left, dp(438), dp(10),
+                        Color.rgb(106,106,117), Paint.Align.LEFT);
 
-                drawText(canvas, "ADAPTIVE COACH · ON DEVICE", left, dp(454), dp(9),
-                        Color.rgb(86,86,97), Paint.Align.LEFT);
-                drawWrapped(canvas, coach, left, right, dp(480), dp(13), Color.rgb(203,203,210));
-            } else {
-                drawPitchWorld(canvas, left, right, worldTop, worldBottom);
-
-                drawText(canvas, stageLabel(), left, worldBottom + dp(38), dp(10),
-                        Color.rgb(91,91,102), Paint.Align.LEFT);
-                drawWrapped(canvas, message, left, right, worldBottom + dp(63), dp(13),
+                drawText(canvas, "LOCAL COACH", left, dp(474), dp(9),
+                        Color.rgb(81,81,92), Paint.Align.LEFT);
+                drawWrapped(canvas, coach, left, right, dp(498), dp(13),
                         Color.rgb(203,203,210));
-
-                String hint = liveHint();
-                if (!hint.isEmpty()) {
-                    drawText(canvas, hint, left, worldBottom + dp(105), dp(10),
-                            Color.rgb(118,118,129), Paint.Align.LEFT);
-                }
-
-                if (hz > 0) {
-                    double cents = (midi - target) * 100.0;
-                    drawText(canvas,
-                            note(midi) + "  ·  " + String.format(Locale.US, "%+.0f cents", cents),
-                            right, worldBottom + dp(105), dp(10),
-                            Color.rgb(118,118,129), Paint.Align.RIGHT);
-                }
             }
 
             if (stage == RESULT) {
                 drawText(canvas, message, left, h - dp(126), dp(11),
                         Color.rgb(126,126,137), Paint.Align.LEFT);
-            } else if (stage != INTRO && stage != CALIBRATE) {
-                drawText(canvas, coach, left, h - dp(126), dp(10),
-                        Color.rgb(88,88,98), Paint.Align.LEFT);
-            } else {
-                drawText(canvas, message, left, h - dp(126), dp(12),
-                        Color.rgb(188,188,196), Paint.Align.LEFT);
+            } else if (stage == CALIBRATE || stage == INTRO) {
+                drawText(canvas, message, left, h - dp(126), dp(11),
+                        Color.rgb(168,168,177), Paint.Align.LEFT);
             }
 
             action.set(left, h - dp(86), right, h - dp(34));
@@ -626,9 +768,12 @@ public final class MainActivity extends Activity {
             paint.setColor(Color.rgb(61,61,68));
             canvas.drawRoundRect(action, dp(26), dp(26), paint);
 
-            String button = stage == INTRO ? "BEGIN" : (stage == RESULT ? "TRAIN AGAIN" : "LISTENING");
+            String button = stage == INTRO ? "BEGIN"
+                    : (stage == RESULT ? "PLAY AGAIN" : "LISTENING");
             drawText(canvas, button, action.centerX(), action.centerY() + dp(4), dp(11),
                     Color.rgb(224,224,229), Paint.Align.CENTER);
+
+            if (stage == SONG && running) postInvalidateOnAnimation();
         }
 
         void drawWrapped(Canvas canvas, String text, float left, float right, float top, float size, int color) {
@@ -637,6 +782,7 @@ public final class MainActivity extends Activity {
             String[] words = text.split(" ");
             StringBuilder line = new StringBuilder();
             float y = top;
+
             for (String word : words) {
                 String test = line.length() == 0 ? word : line + " " + word;
                 if (paint.measureText(test) > right - left && line.length() > 0) {
@@ -647,15 +793,10 @@ public final class MainActivity extends Activity {
                     line = new StringBuilder(test);
                 }
             }
-            if (line.length() > 0) drawText(canvas, line.toString(), left, y, size, color, Paint.Align.LEFT);
-        }
 
-        String stageLabel() {
-            if (stage == HOLD) return "01 · CENTER";
-            if (stage == GLIDE) return "02 · GLIDE";
-            if (stage == INTERVAL) return "03 · PORTALS";
-            if (stage == VIBRATO) return "04 · VIBRATO SCAN";
-            return "";
+            if (line.length() > 0) {
+                drawText(canvas, line.toString(), left, y, size, color, Paint.Align.LEFT);
+            }
         }
 
         @Override public boolean onTouchEvent(MotionEvent event) {
@@ -677,12 +818,13 @@ public final class MainActivity extends Activity {
             return value * getResources().getDisplayMetrics().density;
         }
 
-        final class Frame {
-            final double sungMidi;
-            final double targetMidi;
-            Frame(double sungMidi, double targetMidi) {
-                this.sungMidi = sungMidi;
-                this.targetMidi = targetMidi;
+        final class SungFrame {
+            final long timeMs;
+            final double midi;
+
+            SungFrame(long timeMs, double midi) {
+                this.timeMs = timeMs;
+                this.midi = midi;
             }
         }
     }
