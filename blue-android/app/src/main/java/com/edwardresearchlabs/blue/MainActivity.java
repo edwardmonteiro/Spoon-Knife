@@ -60,8 +60,6 @@ public class MainActivity extends Activity {
 
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             startListening();
-        } else {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
         }
     }
 
@@ -70,8 +68,16 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_MIC && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             startListening();
         } else {
-            blueView.setMessage("Microphone permission is required.");
+            blueView.onMicDenied();
         }
+    }
+
+    @Override public void onBackPressed() {
+        if (blueView != null && !blueView.isHome()) {
+            blueView.goHome();
+            return;
+        }
+        super.onBackPressed();
     }
 
     @Override protected void onDestroy() {
@@ -118,6 +124,7 @@ public class MainActivity extends Activity {
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT
             );
+
             recorder = createRecorder(sampleRate, minBuffer);
             if (recorder == null) {
                 runOnUiThread(() -> blueView.setMessage("Could not open microphone."));
@@ -170,7 +177,7 @@ public class MainActivity extends Activity {
                     }
                 }
             } catch (Throwable e) {
-                runOnUiThread(() -> blueView.setMessage("Microphone stopped. Tap RESET."));
+                runOnUiThread(() -> blueView.setMessage("Microphone stopped."));
             } finally {
                 try { recorder.stop(); } catch (Exception ignored) {}
                 try { recorder.release(); } catch (Exception ignored) {}
@@ -198,6 +205,7 @@ public class MainActivity extends Activity {
     }
 
     private final class BlueView extends View {
+        private static final int HOME = -10;
         private static final int CALIBRATE = 0;
         private static final int BREATH = 1;
         private static final int DRAW = 2;
@@ -205,13 +213,22 @@ public class MainActivity extends Activity {
         private static final int BEND = 4;
         private static final int PHRASE = 5;
         private static final int RESULT = 6;
+        private static final int FREE = 7;
+
+        private static final int MODE_FULL = 0;
+        private static final int MODE_BEND = 1;
+        private static final int MODE_PHRASE = 2;
+        private static final int MODE_FREE = 3;
 
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint linePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint trailPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path trailPath = new Path();
+
         private final Typeface light = Typeface.create("sans-serif-light", Typeface.NORMAL);
+        private final Typeface regular = Typeface.create("sans-serif", Typeface.NORMAL);
+        private final Typeface serif = Typeface.create("serif", Typeface.NORMAL);
         private final SharedPreferences prefs;
 
         private final Target plus4 = new Target("+4", "C5", "blow", 523.251, 520);
@@ -224,12 +241,14 @@ public class MainActivity extends Activity {
 
         private final ArrayDeque<Float> trail = new ArrayDeque<>();
 
-        private int step = CALIBRATE;
+        private int screen = HOME;
+        private int activeMode = MODE_FULL;
+        private int pendingMode = MODE_FULL;
         private int phraseIndex = 0;
+
         private long holdSince = 0;
         private long bendHoldSince = 0;
         private long calibrationStart = 0;
-        private long stepStarted = 0;
         private long lastPitchAt = 0;
 
         private double frequency = -1;
@@ -239,15 +258,19 @@ public class MainActivity extends Activity {
         private double ambientSum = 0;
         private int ambientFrames = 0;
 
+        private boolean micReady = false;
+        private boolean micDenied = false;
         private boolean inBand = false;
         private boolean bendStarted = false;
-        private String message = "Allow microphone to begin.";
+
+        private String message = "MIC NOT STARTED";
 
         private double pitchErrorSum = 0;
         private int pitchFrames = 0;
         private double stabilityDeltaSum = 0;
         private int stabilityFrames = 0;
         private double lastMetricCents = Double.NaN;
+
         private int pitchScore = 0;
         private int steadyScore = 0;
         private int finalScore = 0;
@@ -258,7 +281,6 @@ public class MainActivity extends Activity {
             setBackgroundColor(0xFF030303);
             setClickable(true);
 
-            textPaint.setTypeface(light);
             linePaint.setStrokeWidth(dp(1));
             trailPaint.setStyle(Paint.Style.STROKE);
             trailPaint.setStrokeWidth(dp(1));
@@ -270,12 +292,38 @@ public class MainActivity extends Activity {
             bestScore = prefs.getInt("best_score", 0);
         }
 
+        boolean isHome() {
+            return screen == HOME;
+        }
+
+        void goHome() {
+            screen = HOME;
+            phraseIndex = 0;
+            holdSince = 0;
+            bendHoldSince = 0;
+            inBand = false;
+            bendStarted = false;
+            trail.clear();
+            message = micReady ? "MIC READY" : (micDenied ? "MIC ACCESS REQUIRED" : "MIC STARTING");
+            invalidate();
+        }
+
         void onMicStarted() {
-            step = CALIBRATE;
-            calibrationStart = SystemClock.elapsedRealtime();
-            ambientSum = 0;
-            ambientFrames = 0;
-            message = "Stay quiet for a moment.";
+            micReady = true;
+            micDenied = false;
+            if (screen == CALIBRATE) {
+                beginCalibration();
+            } else {
+                message = "MIC READY";
+                invalidate();
+            }
+        }
+
+        void onMicDenied() {
+            micDenied = true;
+            micReady = false;
+            screen = HOME;
+            message = "MIC ACCESS REQUIRED";
             invalidate();
         }
 
@@ -284,27 +332,86 @@ public class MainActivity extends Activity {
             invalidate();
         }
 
-        private Target currentTarget() {
-            if (step == BREATH) return plus4;
-            if (step == DRAW) return minus4;
-            if (step == SUSTAIN) return sustain4;
-            if (step == BEND) return minus4;
-            if (step == PHRASE) return phrase[Math.min(phraseIndex, phrase.length - 1)];
-            return plus4;
-        }
+        private void startMode(int mode) {
+            activeMode = mode;
+            pendingMode = mode;
+            resetMetrics();
+            phraseIndex = 0;
+            bendStarted = false;
+            trail.clear();
 
-        void onPitch(double hz, double levelRms) {
-            this.frequency = hz;
-            this.rms = levelRms;
-            this.lastPitchAt = SystemClock.elapsedRealtime();
-
-            if (step == CALIBRATE) {
-                calibrate(levelRms);
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                screen = CALIBRATE;
+                message = "ALLOW MICROPHONE";
+                MainActivity.this.requestPermissions(
+                        new String[]{Manifest.permission.RECORD_AUDIO},
+                        REQ_MIC
+                );
                 invalidate();
                 return;
             }
 
-            if (step == RESULT) {
+            if (!listening) startListening();
+            screen = CALIBRATE;
+            beginCalibration();
+        }
+
+        private void beginCalibration() {
+            screen = CALIBRATE;
+            calibrationStart = SystemClock.elapsedRealtime();
+            ambientSum = 0;
+            ambientFrames = 0;
+            message = "STAY QUIET";
+            invalidate();
+        }
+
+        private void finishCalibration() {
+            double ambient = ambientFrames == 0 ? 0.003 : ambientSum / ambientFrames;
+            soundGate = clamp(ambient * 3.0 + 0.002, 0.007, 0.035);
+            trail.clear();
+
+            if (pendingMode == MODE_FULL) {
+                screen = BREATH;
+                message = "Find the center.";
+            } else if (pendingMode == MODE_BEND) {
+                screen = BEND;
+                bendStarted = false;
+                message = "Start clean at −4.";
+            } else if (pendingMode == MODE_PHRASE) {
+                screen = PHRASE;
+                phraseIndex = 0;
+                message = "Five notes. No rush.";
+            } else {
+                screen = FREE;
+                message = "Play anything.";
+            }
+            invalidate();
+        }
+
+        private Target currentTarget() {
+            if (screen == BREATH) return plus4;
+            if (screen == DRAW) return minus4;
+            if (screen == SUSTAIN) return sustain4;
+            if (screen == BEND) return minus4;
+            if (screen == PHRASE) return phrase[Math.min(phraseIndex, phrase.length - 1)];
+            return plus4;
+        }
+
+        void onPitch(double hz, double levelRms) {
+            frequency = hz;
+            rms = levelRms;
+            lastPitchAt = SystemClock.elapsedRealtime();
+
+            if (screen == HOME || screen == RESULT) {
+                invalidate();
+                return;
+            }
+
+            if (screen == CALIBRATE) {
+                ambientSum += levelRms;
+                ambientFrames++;
+                if (calibrationStart == 0) calibrationStart = SystemClock.elapsedRealtime();
+                if (SystemClock.elapsedRealtime() - calibrationStart >= 1250) finishCalibration();
                 invalidate();
                 return;
             }
@@ -318,14 +425,20 @@ public class MainActivity extends Activity {
                 return;
             }
 
+            if (screen == FREE) {
+                handleFree(hz);
+                invalidate();
+                return;
+            }
+
             Target target = currentTarget();
             cents = PitchDetector.centsFromTarget(hz, target.hz);
             long now = SystemClock.elapsedRealtime();
 
-            if (step == BEND) {
+            if (screen == BEND) {
                 handleBend(now);
             } else {
-                double tolerance = step == PHRASE ? 45.0 : 30.0;
+                double tolerance = screen == PHRASE ? 45.0 : 30.0;
                 inBand = Math.abs(cents) <= tolerance;
                 addTrail((float) cents);
 
@@ -341,21 +454,13 @@ public class MainActivity extends Activity {
             invalidate();
         }
 
-        private void calibrate(double levelRms) {
-            long now = SystemClock.elapsedRealtime();
-            if (calibrationStart == 0) calibrationStart = now;
-
-            ambientSum += levelRms;
-            ambientFrames++;
-
-            if (now - calibrationStart >= 1500) {
-                double ambient = ambientFrames == 0 ? 0.003 : ambientSum / ambientFrames;
-                soundGate = clamp(ambient * 3.0 + 0.002, 0.007, 0.035);
-                step = BREATH;
-                stepStarted = now;
-                message = "MIC READY · play +4";
-                trail.clear();
-            }
+        private void handleFree(double hz) {
+            double midi = PitchDetector.midiFromFrequency(hz);
+            int nearest = (int) Math.round(midi);
+            double targetHz = 440.0 * Math.pow(2.0, (nearest - 69) / 12.0);
+            cents = PitchDetector.centsFromTarget(hz, targetHz);
+            inBand = Math.abs(cents) <= 18;
+            addTrail((float) cents);
         }
 
         private void handleBend(long now) {
@@ -363,7 +468,7 @@ public class MainActivity extends Activity {
 
             if (!bendStarted && cents > -28 && cents < 32) {
                 bendStarted = true;
-                message = "Good. Now lower the note.";
+                message = "Now lower the note.";
             }
 
             if (bendStarted && cents < -18 && cents > -150) {
@@ -373,7 +478,7 @@ public class MainActivity extends Activity {
             inBand = bendStarted && cents <= -68 && cents >= -132;
 
             if (inBand) {
-                message = "Hold the bend.";
+                message = "Hold it.";
                 if (bendHoldSince == 0) bendHoldSince = now;
                 if (now - bendHoldSince >= 480) completeTarget();
             } else {
@@ -400,31 +505,36 @@ public class MainActivity extends Activity {
             trail.clear();
             lastMetricCents = Double.NaN;
 
-            if (step == BREATH) {
-                step = DRAW;
-                message = "Now pull the air in.";
-            } else if (step == DRAW) {
-                step = SUSTAIN;
-                message = "Own the note.";
-            } else if (step == SUSTAIN) {
-                step = BEND;
-                bendStarted = false;
-                message = "Start clean at −4.";
-            } else if (step == BEND) {
-                step = PHRASE;
-                phraseIndex = 0;
-                message = "Five notes. No rush.";
-            } else if (step == PHRASE) {
+            if (activeMode == MODE_BEND && screen == BEND) {
+                finishSession();
+                return;
+            }
+
+            if (screen == PHRASE) {
                 phraseIndex++;
                 if (phraseIndex >= phrase.length) {
                     finishSession();
                     return;
                 }
                 message = "Next.";
+                return;
             }
 
-            stepStarted = SystemClock.elapsedRealtime();
-            invalidate();
+            if (screen == BREATH) {
+                screen = DRAW;
+                message = "Pull the air in.";
+            } else if (screen == DRAW) {
+                screen = SUSTAIN;
+                message = "Own the note.";
+            } else if (screen == SUSTAIN) {
+                screen = BEND;
+                bendStarted = false;
+                message = "Start clean at −4.";
+            } else if (screen == BEND) {
+                screen = PHRASE;
+                phraseIndex = 0;
+                message = "Five notes. No rush.";
+            }
         }
 
         private void finishSession() {
@@ -437,34 +547,23 @@ public class MainActivity extends Activity {
                     : (int) Math.round(clamp(100.0 - (stabilityDeltaSum / stabilityFrames) * 2.10, 0, 100));
 
             finalScore = (int) Math.round(pitchScore * 0.65 + steadyScore * 0.35);
+
             if (finalScore > bestScore) {
                 bestScore = finalScore;
                 prefs.edit().putInt("best_score", bestScore).apply();
-                message = "NEW BEST · saved locally";
+                message = "NEW BEST · SAVED LOCALLY";
             } else {
-                message = "Saved locally · no account";
+                message = "SAVED LOCALLY · NO ACCOUNT";
             }
 
-            step = RESULT;
+            screen = RESULT;
             inBand = false;
             trail.clear();
             vibrateSuccess();
             invalidate();
         }
 
-        private void resetSession() {
-            step = BREATH;
-            phraseIndex = 0;
-            holdSince = 0;
-            bendHoldSince = 0;
-            stepStarted = SystemClock.elapsedRealtime();
-            frequency = -1;
-            cents = 0;
-            inBand = false;
-            bendStarted = false;
-            message = "MIC READY · play +4";
-            trail.clear();
-
+        private void resetMetrics() {
             pitchErrorSum = 0;
             pitchFrames = 0;
             stabilityDeltaSum = 0;
@@ -473,18 +572,16 @@ public class MainActivity extends Activity {
             pitchScore = 0;
             steadyScore = 0;
             finalScore = 0;
+        }
 
-            invalidate();
-
-            if (!listening && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                startListening();
-            }
+        private void restartCurrentMode() {
+            startMode(activeMode);
         }
 
         private void addTrail(float value) {
             float v = (float) clamp(value, -150, 150);
             trail.addLast(v);
-            while (trail.size() > 48) trail.removeFirst();
+            while (trail.size() > 52) trail.removeFirst();
         }
 
         private void vibrate() {
@@ -501,7 +598,11 @@ public class MainActivity extends Activity {
                 Vibrator v = (Vibrator) getSystemService(VIBRATOR_SERVICE);
                 if (v == null) return;
                 if (Build.VERSION.SDK_INT >= 26) {
-                    v.vibrate(VibrationEffect.createWaveform(new long[]{0, 28, 55, 42}, new int[]{0, 65, 0, 90}, -1));
+                    v.vibrate(VibrationEffect.createWaveform(
+                            new long[]{0, 28, 55, 42},
+                            new int[]{0, 65, 0, 90},
+                            -1
+                    ));
                 } else {
                     v.vibrate(new long[]{0, 28, 55, 42}, -1);
                 }
@@ -517,9 +618,17 @@ public class MainActivity extends Activity {
         }
 
         private void text(Canvas c, String s, float x, float y, float size, int color, float spacing) {
+            drawText(c, s, x, y, size, color, spacing, light);
+        }
+
+        private void hero(Canvas c, String s, float x, float y, float size, int color) {
+            drawText(c, s, x, y, size, color, -0.02f, serif);
+        }
+
+        private void drawText(Canvas c, String s, float x, float y, float size, int color, float spacing, Typeface face) {
             textPaint.setColor(color);
             textPaint.setTextSize(dp(size));
-            textPaint.setTypeface(light);
+            textPaint.setTypeface(face);
             if (Build.VERSION.SDK_INT >= 21) textPaint.setLetterSpacing(spacing);
             c.drawText(s, x, y, textPaint);
             if (Build.VERSION.SDK_INT >= 21) textPaint.setLetterSpacing(0);
@@ -531,35 +640,73 @@ public class MainActivity extends Activity {
             c.drawLine(x1, y1, x2, y2, linePaint);
         }
 
-        private float holdProgress() {
-            if (step == BEND && bendHoldSince > 0) {
-                return Math.min(1f, (SystemClock.elapsedRealtime() - bendHoldSince) / 480f);
+        private void drawHome(Canvas c, float left, float right, float oy, float h) {
+            text(c, "BLUE", left, oy + dp(44), 10, 0xFFBDBDBD, 0.24f);
+            text(c, "BEST  " + bestScore, right - dp(56), oy + dp(44), 8, 0xFF5D5D5D, 0.10f);
+
+            text(c, "HARMONICA IN C", left, oy + dp(108), 8, 0xFF5E5E5E, 0.18f);
+            hero(c, "Play blues.", left, oy + dp(175), 42, 0xFFF0F0F0);
+            text(c, "Small practice. Deeper sound.", left, oy + dp(205), 11, 0xFF737373, 0.01f);
+
+            float start = oy + dp(262);
+            float row = dp(88);
+            String[] number = {"01", "02", "03", "04"};
+            String[] title = {"PRACTICE", "BEND", "PHRASE", "FREE PLAY"};
+            String[] sub = {
+                    "breath · draw · sustain · bend · phrase",
+                    "lower pitch with control",
+                    "your first five-note blues lick",
+                    "listen to every note"
+            };
+
+            for (int i = 0; i < 4; i++) {
+                float y = start + i * row;
+                line(c, left, y, right, y, 0xFF1B1B1B, 1f);
+                text(c, number[i], left, y + dp(31), 8, 0xFF555555, 0.14f);
+                text(c, title[i], left + dp(42), y + dp(31), 11, 0xFFC8C8C8, 0.12f);
+                text(c, sub[i], left + dp(42), y + dp(56), 10, 0xFF686868, 0.01f);
+                text(c, "›", right - dp(5), y + dp(36), 18, 0xFF6E6E6E, 0);
             }
-            Target t = currentTarget();
-            if (holdSince > 0) {
-                return Math.min(1f, (SystemClock.elapsedRealtime() - holdSince) / (float) t.holdMs);
-            }
-            return 0f;
+            line(c, left, start + 4 * row, right, start + 4 * row, 0xFF1B1B1B, 1f);
+
+            String mic = micReady ? "MIC READY" : (micDenied ? "MIC ACCESS REQUIRED" : "MIC OFF");
+            text(c, mic, left, oy + h - dp(48), 8, micReady ? 0xFF777777 : 0xFF8A6D6D, 0.14f);
+            text(c, "LOCAL AUDIO · NO ACCOUNT", right - dp(118), oy + h - dp(48), 8, 0xFF484848, 0.08f);
         }
 
-        private int liveSteadyScore() {
-            if (stabilityFrames == 0) return 0;
-            return (int) Math.round(clamp(100.0 - (stabilityDeltaSum / stabilityFrames) * 2.10, 0, 100));
+        private void drawCalibration(Canvas c, float left, float right, float oy, float h) {
+            text(c, "BLUE", left, oy + dp(44), 10, 0xFFBDBDBD, 0.24f);
+            text(c, "MENU", right - dp(34), oy + dp(44), 8, 0xFF626262, 0.12f);
+
+            text(c, "MIC CALIBRATION", left, oy + dp(112), 8, 0xFF5F5F5F, 0.16f);
+            hero(c, "Listen.", left, oy + dp(177), 42, 0xFFEDEDED);
+            text(c, "Measuring the room for a cleaner signal.", left, oy + dp(210), 11, 0xFF737373, 0.01f);
+
+            float cy = oy + h * 0.49f;
+            line(c, left, cy, right, cy, 0xFF232323, 1f);
+
+            float pulse = (float) clamp(rms * 360.0, 3.5, 10.0);
+            dotPaint.setColor(0xFFE0E0E0);
+            c.drawCircle((left + right) / 2f, cy, dp(pulse), dotPaint);
+
+            long elapsed = calibrationStart == 0 ? 0 : SystemClock.elapsedRealtime() - calibrationStart;
+            float p = Math.min(1f, elapsed / 1250f);
+            line(c, left, cy + dp(42), right, cy + dp(42), 0xFF181818, 1f);
+            line(c, left, cy + dp(42), left + (right - left) * p, cy + dp(42), 0xFF8A8A8A, 1f);
+
+            text(c, message, left, oy + h - dp(48), 8, 0xFF666666, 0.14f);
+            postInvalidateDelayed(32);
         }
 
         private void drawProgress(Canvas c, float left, float right, float y) {
-            if (step == CALIBRATE || step == RESULT) return;
+            if (activeMode != MODE_FULL || screen < BREATH || screen > PHRASE) return;
 
             float gap = dp(5);
             float seg = (right - left - gap * 4) / 5f;
-            int active = Math.max(0, Math.min(4, step - 1));
+            int active = Math.max(0, Math.min(4, screen - 1));
 
             for (int i = 0; i < 5; i++) {
-                int color;
-                if (i < active) color = 0xFF686868;
-                else if (i == active) color = 0xFFD7D7D7;
-                else color = 0xFF181818;
-
+                int color = i < active ? 0xFF5F5F5F : (i == active ? 0xFFD7D7D7 : 0xFF171717);
                 line(c, left + i * (seg + gap), y, left + i * (seg + gap) + seg, y, color, 1f);
             }
         }
@@ -570,9 +717,11 @@ public class MainActivity extends Activity {
             trailPath.reset();
             int n = trail.size();
             int i = 0;
+
             for (Float value : trail) {
                 float x = left + (right - left) * (i / (float) Math.max(1, n - 1));
                 float y;
+
                 if (bendMode) {
                     float normalized = (float) clamp((-value) / 120.0, 0, 1);
                     y = top + (bottom - top) * normalized;
@@ -585,50 +734,219 @@ public class MainActivity extends Activity {
                 else trailPath.lineTo(x, y);
                 i++;
             }
+
             c.drawPath(trailPath, trailPaint);
         }
 
-        private void drawCalibration(Canvas c, float left, float right, float oy, float h) {
-            text(c, "MIC CALIBRATION", left, oy + dp(90), 9, 0xFF646464, 0.16f);
-            text(c, "Listen.", left, oy + dp(145), 34, 0xFFE8E8E8, -0.015f);
-            text(c, "Measuring the room for a cleaner signal.", left, oy + dp(176), 12, 0xFF777777, 0.01f);
+        private float holdProgress() {
+            if (screen == BEND && bendHoldSince > 0) {
+                return Math.min(1f, (SystemClock.elapsedRealtime() - bendHoldSince) / 480f);
+            }
+            if (screen >= BREATH && screen <= PHRASE && holdSince > 0) {
+                return Math.min(1f,
+                        (SystemClock.elapsedRealtime() - holdSince) / (float) currentTarget().holdMs);
+            }
+            return 0f;
+        }
 
-            float cy = oy + h * 0.48f;
-            line(c, left, cy, right, cy, 0xFF222222, 1f);
+        private int liveSteadyScore() {
+            if (stabilityFrames == 0) return 0;
+            return (int) Math.round(
+                    clamp(100.0 - (stabilityDeltaSum / stabilityFrames) * 2.10, 0, 100)
+            );
+        }
 
-            float pulse = (float) clamp(rms * 350.0, 3.5, 11.0);
-            dotPaint.setColor(0xFFDCDCDC);
-            c.drawCircle((left + right) / 2f, cy, dp(pulse), dotPaint);
+        private void drawTraining(Canvas c, float left, float right, float oy, float h) {
+            text(c, "BLUE", left, oy + dp(44), 10, 0xFFBDBDBD, 0.24f);
+            text(c, "MENU", right - dp(34), oy + dp(44), 8, 0xFF666666, 0.12f);
 
-            long elapsed = calibrationStart == 0 ? 0 : SystemClock.elapsedRealtime() - calibrationStart;
-            float p = Math.min(1f, elapsed / 1500f);
-            line(c, left, cy + dp(42), left + (right - left) * p, cy + dp(42), 0xFF777777, 1f);
+            if (activeMode == MODE_FULL) {
+                text(c, String.format(Locale.US, "%02d / 05", Math.max(1, Math.min(5, screen))),
+                        right - dp(91), oy + dp(44), 8, 0xFF575757, 0.10f);
+            }
+            drawProgress(c, left, right, oy + dp(70));
 
-            text(c, "STAY QUIET", left, oy + h - dp(48), 9, 0xFF666666, 0.14f);
+            Target target = currentTarget();
+            String label;
+            String title;
+            String subtitle;
+
+            if (screen == BREATH) {
+                label = "FIRST BREATH";
+                title = "+4";
+                subtitle = "hole 4 · blow · C5";
+            } else if (screen == DRAW) {
+                label = "DRAW";
+                title = "−4";
+                subtitle = "hole 4 · draw · D5";
+            } else if (screen == SUSTAIN) {
+                label = "SUSTAIN";
+                title = "+4";
+                subtitle = "hold the note · 2 seconds";
+            } else if (screen == BEND) {
+                label = "BEND";
+                title = "−4 ↓";
+                subtitle = "draw · lower D5 toward C♯5";
+            } else {
+                label = "FIRST PHRASE";
+                title = target.tab;
+                subtitle = target.action + " · " + target.note;
+            }
+
+            text(c, label, left, oy + dp(116), 8, 0xFF606060, 0.17f);
+            hero(c, title, left, oy + dp(190), screen == PHRASE ? 50 : 58, 0xFFF0F0F0);
+            text(c, subtitle, left, oy + dp(221), 11, 0xFF777777, 0.01f);
+
+            float laneTop = oy + dp(276);
+            float laneBottom = Math.min(oy + h - dp(250), oy + dp(530));
+            if (laneBottom < laneTop + dp(140)) laneBottom = laneTop + dp(140);
+
+            if (screen == BEND) {
+                float startY = laneTop + dp(22);
+                float targetY = laneBottom - dp(22);
+
+                line(c, left, startY, right, targetY, 0xFF2A2A2A, 1f);
+                line(c, right - dp(66), targetY, right, targetY, 0xFF616161, 1f);
+                text(c, "D5", left, startY - dp(10), 8, 0xFF525252, 0.05f);
+                text(c, "C♯5", right - dp(24), targetY - dp(10), 8, 0xFF727272, 0.02f);
+
+                drawTrail(c, left, right, startY, targetY, true);
+
+                if (frequency > 0 && SystemClock.elapsedRealtime() - lastPitchAt < 500 && rms >= soundGate) {
+                    float bendProgress = (float) clamp((-cents) / 120.0, 0, 1);
+                    float x = left + (right - left) * (0.08f + bendProgress * 0.84f);
+                    float y = startY + (targetY - startY) * bendProgress;
+                    dotPaint.setColor(inBand ? 0xFFF4F4F4 : 0xFF8F8F8F);
+                    c.drawCircle(x, y, dp(inBand ? 5f : 4f), dotPaint);
+                }
+            } else {
+                float cy = (laneTop + laneBottom) / 2f;
+                line(c, left, cy, right, cy, 0xFF303030, 1f);
+                line(c, left, cy - dp(18), right, cy - dp(18), 0xFF191919, 1f);
+                line(c, left, cy + dp(18), right, cy + dp(18), 0xFF191919, 1f);
+
+                drawTrail(c, left, right, laneTop, laneBottom, false);
+
+                if (frequency > 0 && SystemClock.elapsedRealtime() - lastPitchAt < 500 && rms >= soundGate) {
+                    float normalized = (float) clamp(cents / 120.0, -1, 1);
+                    float y = cy - normalized * (laneBottom - laneTop) * 0.42f;
+                    dotPaint.setColor(inBand ? 0xFFF4F4F4 : 0xFF8F8F8F);
+                    c.drawCircle(right - dp(9), y, dp(inBand ? 5f : 4f), dotPaint);
+                }
+            }
+
+            float progressY = laneBottom + dp(22);
+            line(c, left, progressY, right, progressY, 0xFF161616, 1f);
+            line(c, left, progressY, left + (right - left) * holdProgress(), progressY, 0xFF8C8C8C, 1f);
+
+            if (screen == PHRASE) {
+                float tabsY = progressY + dp(49);
+                float gap = (right - left) / phrase.length;
+
+                for (int i = 0; i < phrase.length; i++) {
+                    int color = i < phraseIndex
+                            ? 0xFF626262
+                            : (i == phraseIndex ? 0xFFE7E7E7 : 0xFF343434);
+
+                    float x = left + gap * i;
+                    text(c, phrase[i].tab, x, tabsY, 14, color, 0.01f);
+                    if (i == phraseIndex) {
+                        line(c, x, tabsY + dp(8), x + dp(21), tabsY + dp(8), 0xFFB2B2B2, 1f);
+                    }
+                }
+            }
+
+            drawMetrics(c, left, right, oy, h, true);
+            postInvalidateDelayed(32);
+        }
+
+        private void drawFree(Canvas c, float left, float right, float oy, float h) {
+            text(c, "BLUE", left, oy + dp(44), 10, 0xFFBDBDBD, 0.24f);
+            text(c, "MENU", right - dp(34), oy + dp(44), 8, 0xFF666666, 0.12f);
+
+            text(c, "FREE PLAY", left, oy + dp(116), 8, 0xFF606060, 0.17f);
+            String note = frequency > 0 && rms >= soundGate ? PitchDetector.noteName(frequency) : "—";
+            hero(c, note, left, oy + dp(192), 58, 0xFFF0F0F0);
+            text(c, "play anything · BLUE will listen", left, oy + dp(222), 11, 0xFF777777, 0.01f);
+
+            float top = oy + dp(285);
+            float bottom = Math.min(oy + h - dp(250), oy + dp(530));
+            float cy = (top + bottom) / 2f;
+
+            line(c, left, cy, right, cy, 0xFF303030, 1f);
+            line(c, left, cy - dp(18), right, cy - dp(18), 0xFF191919, 1f);
+            line(c, left, cy + dp(18), right, cy + dp(18), 0xFF191919, 1f);
+
+            drawTrail(c, left, right, top, bottom, false);
+
+            if (frequency > 0 && SystemClock.elapsedRealtime() - lastPitchAt < 500 && rms >= soundGate) {
+                float normalized = (float) clamp(cents / 120.0, -1, 1);
+                float y = cy - normalized * (bottom - top) * 0.42f;
+                dotPaint.setColor(inBand ? 0xFFF4F4F4 : 0xFF8F8F8F);
+                c.drawCircle(right - dp(9), y, dp(inBand ? 5f : 4f), dotPaint);
+            }
+
+            drawMetrics(c, left, right, oy, h, false);
+            postInvalidateDelayed(32);
+        }
+
+        private void drawMetrics(Canvas c, float left, float right, float oy, float h, boolean withSteady) {
+            float y = oy + h - dp(142);
+            line(c, left, y - dp(28), right, y - dp(28), 0xFF181818, 1f);
+
+            String detected = frequency > 0 && rms >= soundGate ? PitchDetector.noteName(frequency) : "—";
+            String pitchText = frequency > 0 && rms >= soundGate
+                    ? String.format(Locale.US, "%+.0f¢", cents)
+                    : "—";
+
+            text(c, "NOTE", left, y, 8, 0xFF5B5B5B, 0.14f);
+            text(c, detected, left, y + dp(25), 15, 0xFFB7B7B7, 0);
+
+            float m2 = left + (right - left) * 0.36f;
+            text(c, "PITCH", m2, y, 8, 0xFF5B5B5B, 0.14f);
+            text(c, pitchText, m2, y + dp(25), 15, inBand ? 0xFFE4E4E4 : 0xFF9A9A9A, 0);
+
+            float m3 = left + (right - left) * 0.72f;
+            if (withSteady) {
+                String steady = stabilityFrames > 4 ? liveSteadyScore() + "%" : "—";
+                text(c, "STEADY", m3, y, 8, 0xFF5B5B5B, 0.14f);
+                text(c, steady, m3, y + dp(25), 15, 0xFFB7B7B7, 0);
+            } else {
+                int signal = (int) Math.round(clamp((rms / Math.max(0.01, soundGate * 4.0)) * 100.0, 0, 100));
+                text(c, "SIGNAL", m3, y, 8, 0xFF5B5B5B, 0.14f);
+                text(c, signal + "%", m3, y + dp(25), 15, 0xFFB7B7B7, 0);
+            }
+
+            text(c, message, left, oy + h - dp(48), 8, 0xFF686868, 0.12f);
+            text(c, "C · DIATONIC", right - dp(69), oy + h - dp(48), 8, 0xFF484848, 0.11f);
         }
 
         private void drawResult(Canvas c, float left, float right, float oy, float h) {
-            text(c, "SESSION COMPLETE", left, oy + dp(92), 9, 0xFF686868, 0.16f);
-            text(c, String.valueOf(finalScore), left, oy + dp(190), 72, 0xFFF0F0F0, -0.025f);
-            text(c, "CONTROL SCORE", left + dp(4), oy + dp(220), 9, 0xFF666666, 0.14f);
+            text(c, "BLUE", left, oy + dp(44), 10, 0xFFBDBDBD, 0.24f);
+            text(c, "MENU", right - dp(34), oy + dp(44), 8, 0xFF666666, 0.12f);
 
-            float y = oy + dp(310);
-            line(c, left, y - dp(25), right, y - dp(25), 0xFF181818, 1f);
+            text(c, "SESSION COMPLETE", left, oy + dp(112), 8, 0xFF606060, 0.17f);
+            hero(c, String.valueOf(finalScore), left, oy + dp(225), 92, 0xFFF0F0F0);
+            text(c, "CONTROL SCORE", left + dp(3), oy + dp(254), 8, 0xFF666666, 0.15f);
 
-            text(c, "PITCH", left, y, 8, 0xFF606060, 0.14f);
-            text(c, pitchScore + "%", left, y + dp(27), 16, 0xFFB8B8B8, 0);
+            float y = oy + dp(345);
+            line(c, left, y - dp(28), right, y - dp(28), 0xFF1A1A1A, 1f);
 
-            float mid = left + (right - left) * 0.5f;
-            text(c, "STEADY", mid, y, 8, 0xFF606060, 0.14f);
-            text(c, steadyScore + "%", mid, y + dp(27), 16, 0xFFB8B8B8, 0);
+            float third = (right - left) / 3f;
+            text(c, "PITCH", left, y, 8, 0xFF5B5B5B, 0.14f);
+            text(c, pitchScore + "%", left, y + dp(29), 17, 0xFFBDBDBD, 0);
 
-            float bestY = y + dp(88);
-            line(c, left, bestY - dp(26), right, bestY - dp(26), 0xFF181818, 1f);
-            text(c, "BEST", left, bestY, 8, 0xFF606060, 0.14f);
-            text(c, bestScore + "", left, bestY + dp(27), 16, 0xFFB8B8B8, 0);
+            text(c, "STEADY", left + third, y, 8, 0xFF5B5B5B, 0.14f);
+            text(c, steadyScore + "%", left + third, y + dp(29), 17, 0xFFBDBDBD, 0);
 
-            text(c, message, left, oy + h - dp(76), 10, 0xFF6F6F6F, 0.04f);
-            text(c, "AGAIN", right - dp(42), oy + h - dp(34), 9, 0xFFBDBDBD, 0.14f);
+            text(c, "BEST", left + third * 2f, y, 8, 0xFF5B5B5B, 0.14f);
+            text(c, String.valueOf(bestScore), left + third * 2f, y + dp(29), 17, 0xFFBDBDBD, 0);
+
+            float actionY = oy + h - dp(108);
+            line(c, left, actionY - dp(25), right, actionY - dp(25), 0xFF1A1A1A, 1f);
+            text(c, "AGAIN", left, actionY + dp(8), 9, 0xFFBCBCBC, 0.15f);
+            text(c, "MENU", right - dp(31), actionY + dp(8), 9, 0xFF777777, 0.15f);
+            text(c, message, left, oy + h - dp(48), 8, 0xFF525252, 0.10f);
         }
 
         @Override protected void onDraw(Canvas c) {
@@ -641,154 +959,51 @@ public class MainActivity extends Activity {
             float left = ox + dp(26);
             float right = ox + w - dp(26);
 
-            text(c, "BLUE", left, oy + dp(42), 10, 0xFFBDBDBD, 0.24f);
-
-            if (step == CALIBRATE) {
+            if (screen == HOME) {
+                drawHome(c, left, right, oy, h);
+            } else if (screen == CALIBRATE) {
                 drawCalibration(c, left, right, oy, h);
-                postInvalidateDelayed(32);
-                return;
-            }
-
-            if (step == RESULT) {
-                text(c, "RESET", right - dp(40), oy + dp(42), 9, 0xFF676767, 0.12f);
+            } else if (screen == RESULT) {
                 drawResult(c, left, right, oy, h);
-                return;
-            }
-
-            text(c, String.format(Locale.US, "%02d / 05", Math.max(1, Math.min(5, step))),
-                    right - dp(52), oy + dp(42), 9, 0xFF676767, 0.12f);
-
-            drawProgress(c, left, right, oy + dp(70));
-
-            Target target = currentTarget();
-            String label;
-            String title;
-            String subtitle;
-
-            if (step == BREATH) {
-                label = "FIRST BREATH";
-                title = "+4";
-                subtitle = "hole 4 · blow · C5";
-            } else if (step == DRAW) {
-                label = "DRAW";
-                title = "−4";
-                subtitle = "hole 4 · draw · D5";
-            } else if (step == SUSTAIN) {
-                label = "SUSTAIN";
-                title = "+4";
-                subtitle = "hold the note · 2 seconds";
-            } else if (step == BEND) {
-                label = "BEND";
-                title = "−4  ↓";
-                subtitle = "draw · lower D5 toward C♯5";
+            } else if (screen == FREE) {
+                drawFree(c, left, right, oy, h);
             } else {
-                label = "FIRST PHRASE";
-                title = target.tab;
-                subtitle = target.action + " · " + target.note;
+                drawTraining(c, left, right, oy, h);
             }
-
-            text(c, label, left, oy + dp(116), 9, 0xFF686868, 0.16f);
-            text(c, title, left, oy + dp(184), 48, 0xFFECECEC, -0.02f);
-            text(c, subtitle, left, oy + dp(214), 12, 0xFF777777, 0.01f);
-
-            float laneTop = oy + dp(268);
-            float laneBottom = Math.min(oy + h - dp(260), oy + dp(525));
-            if (laneBottom < laneTop + dp(140)) laneBottom = laneTop + dp(140);
-
-            if (step == BEND) {
-                float startY = laneTop + dp(24);
-                float targetY = laneBottom - dp(24);
-
-                line(c, left, startY, right, targetY, 0xFF242424, 1f);
-                line(c, right - dp(76), targetY, right, targetY, 0xFF626262, 1f);
-                text(c, "0¢", left, startY - dp(10), 8, 0xFF505050, 0.04f);
-                text(c, "−100¢", right - dp(44), targetY - dp(10), 8, 0xFF777777, 0.02f);
-
-                drawTrail(c, left, right, startY, targetY, true);
-
-                if (frequency > 0 && SystemClock.elapsedRealtime() - lastPitchAt < 500 && rms >= soundGate) {
-                    float bendProgress = (float) clamp((-cents) / 120.0, 0, 1);
-                    float x = left + (right - left) * (0.08f + bendProgress * 0.84f);
-                    float y = startY + (targetY - startY) * bendProgress;
-                    dotPaint.setColor(inBand ? 0xFFF1F1F1 : 0xFF8D8D8D);
-                    c.drawCircle(x, y, dp(inBand ? 5f : 4f), dotPaint);
-                }
-            } else {
-                float cy = (laneTop + laneBottom) / 2f;
-                line(c, left, cy, right, cy, 0xFF323232, 1f);
-                line(c, left, cy - dp(18), right, cy - dp(18), 0xFF1C1C1C, 1f);
-                line(c, left, cy + dp(18), right, cy + dp(18), 0xFF1C1C1C, 1f);
-
-                drawTrail(c, left, right, laneTop, laneBottom, false);
-
-                if (frequency > 0 && SystemClock.elapsedRealtime() - lastPitchAt < 500 && rms >= soundGate) {
-                    float normalized = (float) clamp(cents / 120.0, -1, 1);
-                    float y = cy - normalized * (laneBottom - laneTop) * 0.42f;
-                    float x = right - dp(10);
-                    dotPaint.setColor(inBand ? 0xFFF1F1F1 : 0xFF8D8D8D);
-                    c.drawCircle(x, y, dp(inBand ? 5f : 4f), dotPaint);
-                }
-            }
-
-            float progressY = laneBottom + dp(22);
-            line(c, left, progressY, right, progressY, 0xFF161616, 1f);
-            line(c, left, progressY, left + (right - left) * holdProgress(), progressY, 0xFF8A8A8A, 1f);
-
-            if (step == PHRASE) {
-                float tabsY = progressY + dp(48);
-                float gap = (right - left) / phrase.length;
-                for (int i = 0; i < phrase.length; i++) {
-                    int color = i < phraseIndex
-                            ? 0xFF666666
-                            : (i == phraseIndex ? 0xFFE7E7E7 : 0xFF343434);
-
-                    float x = left + gap * i;
-                    text(c, phrase[i].tab, x, tabsY, 14, color, 0.01f);
-                    if (i == phraseIndex) {
-                        line(c, x, tabsY + dp(8), x + dp(22), tabsY + dp(8), 0xFFADADAD, 1f);
-                    }
-                }
-            }
-
-            float infoY = oy + h - dp(144);
-            line(c, left, infoY - dp(28), right, infoY - dp(28), 0xFF181818, 1f);
-
-            String detected = frequency > 0 && rms >= soundGate ? PitchDetector.noteName(frequency) : "—";
-            String pitchText = frequency > 0 && rms >= soundGate
-                    ? String.format(Locale.US, "%+.0f¢", cents)
-                    : "—";
-            String steady = stabilityFrames > 4 ? liveSteadyScore() + "%" : "—";
-
-            text(c, "NOTE", left, infoY, 8, 0xFF5C5C5C, 0.14f);
-            text(c, detected, left, infoY + dp(25), 15, 0xFFB7B7B7, 0);
-
-            float m2 = left + (right - left) * 0.36f;
-            text(c, "PITCH", m2, infoY, 8, 0xFF5C5C5C, 0.14f);
-            text(c, pitchText, m2, infoY + dp(25), 15, inBand ? 0xFFE4E4E4 : 0xFF9B9B9B, 0);
-
-            float m3 = left + (right - left) * 0.72f;
-            text(c, "STEADY", m3, infoY, 8, 0xFF5C5C5C, 0.14f);
-            text(c, steady, m3, infoY + dp(25), 15, 0xFFB7B7B7, 0);
-
-            text(c, message, left, oy + h - dp(50), 10, 0xFF6D6D6D, 0.03f);
-            text(c, "C · DIATONIC", right - dp(70), oy + h - dp(50), 8, 0xFF4E4E4E, 0.12f);
-
-            postInvalidateDelayed(32);
         }
 
         @Override public boolean onTouchEvent(MotionEvent event) {
             if (event.getAction() != MotionEvent.ACTION_UP) return true;
 
-            float y = event.getY();
             float x = event.getX();
+            float y = event.getY();
+            float oy = getPaddingTop();
+            float h = getHeight() - getPaddingTop() - getPaddingBottom();
 
-            if (step == RESULT && y > getHeight() - getPaddingBottom() - dp(90)) {
-                resetSession();
+            if (screen == HOME) {
+                float start = oy + dp(262);
+                float row = dp(88);
+                if (y >= start && y < start + row * 4) {
+                    int index = (int) ((y - start) / row);
+                    if (index == 0) startMode(MODE_FULL);
+                    else if (index == 1) startMode(MODE_BEND);
+                    else if (index == 2) startMode(MODE_PHRASE);
+                    else startMode(MODE_FREE);
+                }
                 return true;
             }
 
-            if (y < getPaddingTop() + dp(78) && x > getWidth() - getPaddingRight() - dp(105)) {
-                resetSession();
+            if (screen == RESULT) {
+                float actionY = oy + h - dp(108);
+                if (y > actionY - dp(45)) {
+                    if (x < getWidth() / 2f) restartCurrentMode();
+                    else goHome();
+                    return true;
+                }
+            }
+
+            if (y < oy + dp(75) && x > getWidth() - getPaddingRight() - dp(95)) {
+                goHome();
                 return true;
             }
 
