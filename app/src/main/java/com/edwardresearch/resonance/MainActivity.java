@@ -58,6 +58,8 @@ public final class MainActivity extends Activity {
         final RectF[] homeCards={new RectF(),new RectF(),new RectF(),new RectF(),new RectF(),new RectF()};
         int screen=SCREEN_HOME;
         boolean libraryTab=false;
+        int systemTopInset=0;
+        int systemBottomInset=0;
         final int BG=Color.rgb(7,11,14), PANEL=Color.rgb(14,20,23), PANEL2=Color.rgb(18,24,27);
         final int GOLD=Color.rgb(235,194,137), CREAM=Color.rgb(239,225,205), MUTED=Color.rgb(137,142,147), LINE=Color.rgb(48,56,60);
         final SharedPreferences prefs = getSharedPreferences("resonance_local",0);
@@ -107,10 +109,25 @@ public final class MainActivity extends Activity {
             stroke.setStyle(Paint.Style.STROKE);
             level = clampLevel(prefs.getInt("level",1));
             plan = LocalCoachEngine.createPlan(prefs, level);
+            setFocusable(true);
+            setOnApplyWindowInsetsListener((v, insets) -> {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                    systemTopInset = bars.top;
+                    systemBottomInset = bars.bottom;
+                } else {
+                    systemTopInset = insets.getSystemWindowInsetTop();
+                    systemBottomInset = insets.getSystemWindowInsetBottom();
+                }
+                postInvalidateOnAnimation();
+                return insets;
+            });
+            post(this::requestApplyInsets);
         }
 
         void startSession() {
             stopAll();
+            screen=SCREEN_TRAINING;
 
             level = clampLevel(prefs.getInt("level",1));
             nextLevel = level;
@@ -696,7 +713,7 @@ public final class MainActivity extends Activity {
         }
 
         void drawBottomNav(Canvas c,int active){
-            float h=getHeight(),w=getWidth();
+            float h=getHeight()-Math.max(systemBottomInset, (int)dp(4)),w=getWidth();
             RectF nav=new RectF(dp(15),h-dp(69),w-dp(15),h-dp(10));roundPanel(c,nav,dp(17),Color.rgb(9,14,17),Color.rgb(39,47,51));
             float[] xs={w*0.16f,w*0.39f,w*0.62f,w*0.84f};String[] labels={"Home","Stats","Coach","Library"};RectF[] rs={navHome,navStats,navCoach,navLibrary};
             for(int i=0;i<4;i++){
@@ -827,20 +844,63 @@ public final class MainActivity extends Activity {
             if(line.length()>0) text(c,line.toString(),left,y,size,color,Paint.Align.LEFT);
         }
 
+        boolean hit(RectF r,float x,float y,float extra){
+            return x>=r.left-dp(extra)&&x<=r.right+dp(extra)&&y>=r.top-dp(extra)&&y<=r.bottom+dp(extra);
+        }
+
+        void tapFeedback(){
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        }
+
         @Override public boolean onTouchEvent(MotionEvent e) {
+            if(e.getAction()==MotionEvent.ACTION_DOWN){
+                setPressed(true);
+                return true;
+            }
+            if(e.getAction()==MotionEvent.ACTION_CANCEL){
+                setPressed(false);
+                return true;
+            }
             if(e.getAction()!=MotionEvent.ACTION_UP) return true;
+            setPressed(false);
             float x=e.getX(),y=e.getY();
-            if(navHome.contains(x,y)){stopAll();screen=SCREEN_HOME;stage=INTRO;invalidate();performClick();return true;}
-            if(navStats.contains(x,y)){stopAll();screen=SCREEN_STATS;invalidate();performClick();return true;}
-            if(navCoach.contains(x,y)){stopAll();screen=SCREEN_COACH;libraryTab=false;invalidate();performClick();return true;}
-            if(navLibrary.contains(x,y)){stopAll();screen=SCREEN_COACH;libraryTab=true;invalidate();performClick();return true;}
+
+            if(hit(navHome,x,y,10)){tapFeedback();stopAll();screen=SCREEN_HOME;stage=INTRO;invalidate();performClick();return true;}
+            if(hit(navStats,x,y,10)){tapFeedback();stopAll();screen=SCREEN_STATS;invalidate();performClick();return true;}
+            if(hit(navCoach,x,y,10)){tapFeedback();stopAll();screen=SCREEN_COACH;libraryTab=false;invalidate();performClick();return true;}
+            if(hit(navLibrary,x,y,10)){tapFeedback();stopAll();screen=SCREEN_COACH;libraryTab=true;invalidate();performClick();return true;}
+
             if(screen==SCREEN_HOME){
-                if(homeBegin.contains(x,y)){begin();performClick();return true;}
-                for(int i=0;i<homeCards.length;i++)if(homeCards[i].contains(x,y)){if(i==5){screen=SCREEN_STATS;invalidate();}else begin();performClick();return true;}
+                if(hit(homeBegin,x,y,12)){tapFeedback();begin();performClick();return true;}
+                for(int i=0;i<homeCards.length;i++){
+                    if(hit(homeCards[i],x,y,5)){
+                        tapFeedback();
+                        if(i==5){screen=SCREEN_STATS;invalidate();}
+                        else begin();
+                        performClick();
+                        return true;
+                    }
+                }
             } else if(screen==SCREEN_COACH){
-                if(y>=dp(95)&&y<=dp(131)){libraryTab=x>getWidth()/2f;invalidate();performClick();return true;}
-                if(!libraryTab&&y>=dp(145)&&y<=dp(326)){begin();performClick();return true;}
-            } else if(screen==SCREEN_TRAINING&&stage==RESULT){begin();performClick();return true;}
+                if(y>=dp(88)&&y<=dp(140)){
+                    tapFeedback();
+                    libraryTab=x>getWidth()/2f;
+                    invalidate();
+                    performClick();
+                    return true;
+                }
+                if(!libraryTab&&y>=dp(138)&&y<=dp(338)){
+                    tapFeedback();
+                    begin();
+                    performClick();
+                    return true;
+                }
+            } else if(screen==SCREEN_TRAINING&&stage==RESULT){
+                tapFeedback();
+                begin();
+                performClick();
+                return true;
+            }
             return true;
         }
 
