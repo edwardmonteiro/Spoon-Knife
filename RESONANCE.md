@@ -1,33 +1,31 @@
-# Resonance — 0.4.0 Echo Recall
+# Resonance — 0.5.0 Adaptive Vocal Coach
 
-Local-first Android singing game focused on ear training, vocal memory and targeted correction.
+Local-first Android singing tutor that builds each session from the user's on-device skill profile.
 
-## Echo Recall loop
-1. Calibrate a comfortable center note.
-2. LISTEN: the app synthesizes a short melody entirely on-device.
-3. RECALL: the visual target disappears and the user sings the phrase from memory.
-4. DIAGNOSE: the app compares the attempt against each phrase segment.
-5. REPAIR: only the weakest local segment is replayed and practiced with the guide visible.
-6. Repeat across three phrases, then update the local voice-learning profile.
+## Adaptive session
+- Reads rolling local mastery for Pitch, Stability, Memory, Repair and Intervals.
+- Chooses a primary and secondary training focus before the session begins.
+- Changes warm-up hold duration based on stability.
+- Adds interval training with an automatically selected semitone distance.
+- Changes phrase difficulty independently from the visible level when memory/pitch performance suggests it.
+- Keeps Echo Recall: listen → recall without target → diagnose weakest section → focused repair.
+- Updates each skill using an exponential moving average after the session.
 
-## 0.4 additions
-- Offline melody synthesis with Android AudioTrack.
-- Hidden-target recall mode.
-- Per-step error analysis.
-- Automatic weakest-segment detection.
-- Focused repair loop using the difficult step plus one adjacent step.
-- Memory score.
-- Repair score.
-- Pitch and stability scores retained.
-- Levels 1–5 still adapt phrase complexity and tempo.
-- All data remains local.
+## Local skill profile
+The app persists a five-dimension profile:
+- P: pitch accuracy
+- S: stability
+- M: melodic memory
+- R: repair response
+- I: interval control
+
+The profile is used to decide the next training session without any network dependency.
 
 ## Privacy
 - No INTERNET permission.
-- Microphone audio is analyzed in memory and never uploaded.
-- Raw recordings are not stored.
-- Progress and metrics remain in Android SharedPreferences.
+- Raw microphone audio is never stored or uploaded.
+- Progress, skill estimates and session plans remain on-device.
 
 ## AI strategy
-The critical loop is still local DSP + adaptive logic.
-OpenAI remains reserved for future opt-in generative coaching, imported-song decomposition and advanced explanations.
+0.5 treats adaptation as local intelligence: DSP + statistics + a deterministic curriculum planner.
+OpenAI remains optional for a future generative coach that can explain patterns or decompose imported songs from derived metrics.
