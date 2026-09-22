@@ -84,7 +84,7 @@ public final class MainActivity extends Activity {
         long voicedAt, lastPitchAt, lastAcceptedAt, stageStartedAt;
         long recallStartAt, recallEndAt, phaseUntil;
         long voicedMs;
-        long intervalGoodMs;
+        double intervalGoodMs;
 
         String message="Sua voz fica no aparelho.";
         String coach="Tudo funciona offline.";
