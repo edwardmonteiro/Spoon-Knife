@@ -5,6 +5,8 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@drawable/ic_blue"
+        android:roundIcon="@drawable/ic_blue"
         android:label="BLUE"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
