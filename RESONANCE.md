@@ -1,31 +1,23 @@
-# Resonance — 0.5.0 Adaptive Vocal Coach
+# Resonance — 0.6.0 Visual Match
 
-Local-first Android singing tutor that builds each session from the user's on-device skill profile.
+Premium native Android visual shell aligned with the approved isometric Resonance mockups.
 
-## Adaptive session
-- Reads rolling local mastery for Pitch, Stability, Memory, Repair and Intervals.
-- Chooses a primary and secondary training focus before the session begins.
-- Changes warm-up hold duration based on stability.
-- Adds interval training with an automatically selected semitone distance.
-- Changes phrase difficulty independently from the visible level when memory/pitch performance suggests it.
-- Keeps Echo Recall: listen → recall without target → diagnose weakest section → focused repair.
-- Updates each skill using an exponential moving average after the session.
+## 0.6
+- Home screen with six isometric modules: Warm Up, Pitch, Intervals, Echo Recall, Repair and Progress.
+- Premium dark / charcoal / warm-gold visual system.
+- Native mountain / halo hero treatment.
+- Large Begin Session CTA.
+- Functional bottom navigation: Home, Stats, Coach, Library.
+- Stats screen backed by the real local skill profile.
+- Coach screen backed by the adaptive local plan.
+- Library mode using the same visual system.
+- Live Training screen keeps the existing local singing engine and overlays the new premium visual hierarchy.
+- Android layout is designed to leave safe space above the system navigation area.
 
-## Local skill profile
-The app persists a five-dimension profile:
-- P: pitch accuracy
-- S: stability
-- M: melodic memory
-- R: repair response
-- I: interval control
-
-The profile is used to decide the next training session without any network dependency.
+## Architecture
+The UI is drawn natively on Android Canvas rather than being a static screenshot, so scores, skill levels, coach focus, training graphs and navigation remain interactive.
 
 ## Privacy
 - No INTERNET permission.
-- Raw microphone audio is never stored or uploaded.
-- Progress, skill estimates and session plans remain on-device.
-
-## AI strategy
-0.5 treats adaptation as local intelligence: DSP + statistics + a deterministic curriculum planner.
-OpenAI remains optional for a future generative coach that can explain patterns or decompose imported songs from derived metrics.
+- Raw microphone audio never leaves the device.
+- Training state and profile remain local.
