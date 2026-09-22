@@ -1,8 +1,8 @@
-name: Build Resonance 0.4 APK
+name: Build Resonance 0.5 APK
 
 on:
   push:
-    branches: [resonance-v0.4]
+    branches: [resonance-v0.5]
   workflow_dispatch:
 
 jobs:
@@ -23,10 +23,10 @@ jobs:
       - name: Prepare artifact
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Resonance-0.4.0.apk
-          sha256sum dist/Resonance-0.4.0.apk | tee dist/SHA256.txt
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Resonance-0.5.0.apk
+          sha256sum dist/Resonance-0.5.0.apk | tee dist/SHA256.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: Resonance-0.4.0
+          name: Resonance-0.5.0
           path: dist/
           if-no-files-found: error
