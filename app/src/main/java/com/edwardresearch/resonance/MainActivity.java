@@ -47,7 +47,7 @@ public final class MainActivity extends Activity {
     }
 
     final class GameView extends View {
-        static final int INTRO=0, CALIBRATE=1, CENTER=2, LISTEN=3, RECALL=4, REPAIR=5, RESULT=6;
+        static final int INTRO=0, CALIBRATE=1, CENTER=2, INTERVAL=3, LISTEN=4, RECALL=5, REPAIR=6, RESULT=7;
 
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -55,6 +55,7 @@ public final class MainActivity extends Activity {
         final SharedPreferences prefs = getSharedPreferences("resonance_local",0);
         final String[] noteNames={"C","C♯","D","D♯","E","F","F♯","G","G♯","A","A♯","B"};
         final LocalMelodyPlayer melodyPlayer = new LocalMelodyPlayer();
+        LocalCoachEngine.Plan plan;
 
         final ArrayDeque<Double> hzMedian = new ArrayDeque<>();
         final ArrayDeque<SungFrame> trail = new ArrayDeque<>();
@@ -64,6 +65,7 @@ public final class MainActivity extends Activity {
         final ArrayList<Double> repairErrors = new ArrayList<>();
         final ArrayList<Integer> phraseScores = new ArrayList<>();
         final ArrayList<Integer> repairScores = new ArrayList<>();
+        final ArrayList<Double> intervalErrors = new ArrayList<>();
         ArrayList<Double>[] stepErrors;
 
         volatile boolean running=false;
@@ -72,6 +74,7 @@ public final class MainActivity extends Activity {
         int stage=INTRO;
         int level, nextLevel, sessionNumber;
         int phraseIndex;
+        int intervalTrial, intervalScore;
         int score, memoryScore, pitchScore, repairScore, stabilityScore;
         int weakestStep, repairStartStep, repairEndStep;
         int repairPhase; // 0 listen, 1 count-in, 2 sing, 3 feedback
@@ -81,6 +84,7 @@ public final class MainActivity extends Activity {
         long voicedAt, lastPitchAt, lastAcceptedAt, stageStartedAt;
         long recallStartAt, recallEndAt, phaseUntil;
         long voicedMs;
+        long intervalGoodMs;
 
         String message="Sua voz fica no aparelho.";
         String coach="Tudo funciona offline.";
@@ -101,6 +105,7 @@ public final class MainActivity extends Activity {
 
             level = clampLevel(prefs.getInt("level",1));
             nextLevel = level;
+            plan = LocalCoachEngine.createPlan(prefs, level);
             sessionNumber = prefs.getInt("session_count",0);
             phraseIndex = 0;
             score=memoryScore=pitchScore=repairScore=stabilityScore=0;
@@ -109,6 +114,7 @@ public final class MainActivity extends Activity {
             voicedAt=lastPitchAt=lastAcceptedAt=0;
             recallStartAt=recallEndAt=phaseUntil=0;
             voicedMs=0;
+            intervalGoodMs=0;
 
             calibration.clear();
             centerErrors.clear();
@@ -116,11 +122,12 @@ public final class MainActivity extends Activity {
             repairErrors.clear();
             phraseScores.clear();
             repairScores.clear();
+            intervalErrors.clear();
             hzMedian.clear();
             trail.clear();
 
             message="Cante uma nota confortável. Sem força.";
-            coach="Depois você ouvirá uma frase e cantará de memória.";
+            coach=plan.rationale
             moment="";
             stage=CALIBRATE;
             stageStartedAt=System.currentTimeMillis();
@@ -204,6 +211,7 @@ public final class MainActivity extends Activity {
 
             if(stage==CALIBRATE) handleCalibration(now);
             else if(stage==CENTER) handleCenter(frameMs,now);
+            else if(stage==INTERVAL) handleInterval(frameMs,now);
             else if(stage==RECALL) handleRecall(frameMs,now);
             else if(stage==REPAIR && repairPhase==2) handleRepair(frameMs,now);
 
@@ -235,10 +243,44 @@ public final class MainActivity extends Activity {
             if(Math.abs(cents)<=centerTolerance() && confidence>=0.62) centerGoodMs+=frameMs;
             else centerGoodMs=Math.max(0,centerGoodMs-frameMs*0.7);
 
-            if(centerGoodMs>=1400) {
-                song=SongPathEngine.create(level,sessionNumber);
-                phraseIndex=0;
-                beginListen(now);
+            if(centerGoodMs>=plan.warmupHoldMs) {
+                beginInterval(now);
+            }
+        }
+
+        void beginInterval(long now) {
+            stage=INTERVAL;
+            stageStartedAt=now;
+            intervalTrial=0;
+            intervalGoodMs=0;
+            intervalErrors.clear();
+            message="INTERVAL · encontre a distância";
+            coach="Foco local: "+plan.focus+" · salto de "+plan.intervalSemitones+" semitons.";
+            target=base+plan.intervalSemitones;
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        }
+
+        void handleInterval(long frameMs,long now) {
+            double cents=(midi-target)*100.0;
+            intervalErrors.add(cents);
+            if(Math.abs(cents)<=Math.max(35,centerTolerance()+8) && confidence>=0.60) intervalGoodMs+=frameMs;
+            else intervalGoodMs=Math.max(0,intervalGoodMs-frameMs*0.6);
+
+            if(intervalGoodMs>=650) {
+                intervalTrial++;
+                intervalGoodMs=0;
+                if(intervalTrial>=plan.intervalTrials) {
+                    intervalScore=(int)Math.round(VoiceMetrics.clamp(
+                            100-VoiceMetrics.meanAbsolute(intervalErrors,120)*0.80,0,100));
+                    song=SongPathEngine.create(plan.phraseLevel,sessionNumber);
+                    phraseIndex=0;
+                    beginListen(now);
+                } else {
+                    target=(intervalTrial%2==0)
+                            ?base+plan.intervalSemitones
+                            :base-plan.intervalSemitones;
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                }
             }
         }
 
@@ -403,7 +445,7 @@ public final class MainActivity extends Activity {
             stabilityScore=(int)Math.round(VoiceMetrics.clamp(
                     100-Math.max(0,VoiceMetrics.standardDeviation(centerErrors)-7)*1.5,0,100));
 
-            score=(int)Math.round(memoryScore*0.45 + repairScore*0.25 + pitchScore*0.20 + stabilityScore*0.10);
+            score=(int)Math.round(memoryScore*0.38 + repairScore*0.20 + pitchScore*0.17 + stabilityScore*0.10 + intervalScore*0.15);
 
             nextLevel=level;
             if(score>=78 && memoryScore>=70 && repairScore>=68 && level<5) nextLevel=level+1;
@@ -426,7 +468,10 @@ public final class MainActivity extends Activity {
                     .putInt("last_memory_score",memoryScore)
                     .putInt("last_repair_score",repairScore)
                     .putInt("last_pitch_score",pitchScore)
+                    .putInt("last_interval_score",intervalScore)
                     .apply();
+
+            LocalCoachEngine.updateProfile(prefs,pitchScore,stabilityScore,memoryScore,repairScore,intervalScore);
 
             invalidate();
         }
@@ -589,17 +634,27 @@ public final class MainActivity extends Activity {
             float left=dp(26),right=w-dp(26),top=dp(92),bottom=h-dp(245);
 
             text(c,"RESONANCE",left,dp(42),dp(13),Color.rgb(225,225,229),Paint.Align.LEFT);
-            text(c,"0.4 · LEVEL "+String.format(Locale.US,"%02d",level),right,dp(42),dp(10),Color.rgb(115,115,126),Paint.Align.RIGHT);
+            text(c,"0.5 · LEVEL "+String.format(Locale.US,"%02d",level),right,dp(42),dp(10),Color.rgb(115,115,126),Paint.Align.RIGHT);
 
             if(stage==INTRO) {
-                text(c,"ECHO RECALL",w/2,h*0.34f,dp(42),Color.rgb(239,239,242),Paint.Align.CENTER);
-                text(c,"hear · remember · sing · repair",w/2,h*0.34f+dp(39),dp(11),Color.rgb(104,104,115),Paint.Align.CENTER);
+                text(c,"ADAPTIVE COACH",w/2,h*0.34f,dp(40),Color.rgb(239,239,242),Paint.Align.CENTER);
+                text(c,"today · "+plan.focus.toLowerCase(Locale.US),w/2,h*0.34f+dp(39),dp(11),Color.rgb(104,104,115),Paint.Align.CENTER);
+                text(c,LocalCoachEngine.profileLine(prefs),w/2,h*0.34f+dp(72),dp(9),Color.rgb(82,82,92),Paint.Align.CENTER);
             } else if(stage==CALIBRATE) {
                 text(c,hz>0?note(midi):"—",w/2,h*0.35f,dp(58),Color.rgb(239,239,242),Paint.Align.CENTER);
                 text(c,"FIND YOUR CENTER",w/2,h*0.35f+dp(43),dp(10),Color.rgb(105,105,116),Paint.Align.CENTER);
             } else if(stage==CENTER) {
                 drawCenter(c,left,right,top,bottom);
                 text(c,"WARM UP",left,bottom+dp(38),dp(10),Color.rgb(91,91,102),Paint.Align.LEFT);
+            } else if(stage==INTERVAL) {
+                drawCenter(c,left,right,top,bottom);
+                float targetY=yFor(target,top,bottom);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(1.3f));
+                paint.setColor(Color.rgb(118,118,130));
+                c.drawCircle((left+right)/2,targetY,dp(18),paint);
+                text(c,"INTERVAL "+(intervalTrial+1)+"/"+plan.intervalTrials,left,bottom+dp(38),dp(10),Color.rgb(190,190,198),Paint.Align.LEFT);
+                text(c,(target>=base?"+":"")+String.format(Locale.US,"%.0f",target-base)+" semitones",right,bottom+dp(38),dp(10),Color.rgb(110,110,121),Paint.Align.RIGHT);
             } else if(stage==LISTEN) {
                 drawPhraseShape(c,left,right,top,bottom,true);
                 text(c,"LISTEN ONLY",left,bottom+dp(38),dp(10),Color.rgb(190,190,198),Paint.Align.LEFT);
@@ -627,8 +682,9 @@ public final class MainActivity extends Activity {
                 drawMetric(c,"REPAIR",repairScore,left,right,dp(299));
                 drawMetric(c,"PITCH",pitchScore,left,right,dp(343));
                 drawMetric(c,"STABILITY",stabilityScore,left,right,dp(387));
-                text(c,"LOCAL COACH",left,dp(443),dp(9),Color.rgb(81,81,92),Paint.Align.LEFT);
-                drawWrapped(c,coach,left,right,dp(468),dp(13),Color.rgb(203,203,210));
+                drawMetric(c,"INTERVAL",intervalScore,left,right,dp(431));
+                text(c,"LOCAL COACH",left,dp(477),dp(9),Color.rgb(81,81,92),Paint.Align.LEFT);
+                drawWrapped(c,coach,left,right,dp(501),dp(13),Color.rgb(203,203,210));
             }
 
             if(stage!=RESULT && stage!=INTRO) {
