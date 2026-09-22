@@ -1,26 +1,33 @@
-# Resonance — 0.3.0 Song Path
+# Resonance — 0.4.0 Echo Recall
 
-Local-first Android singing game.
+Local-first Android singing game focused on ear training, vocal memory and targeted correction.
 
-## 0.3 core experience
-- Song Path: three short melodic phrases generated locally for each session.
-- Every phrase is automatically transposed around the user's calibrated center note.
-- A fixed playhead shows the present while the target melody scrolls from right to left.
-- The user's sung contour is drawn as a second line over the target.
-- Visual 2-beat count-in before each phrase.
-- Phrase scoring combines pitch accuracy, voiced coverage and time spent in sync.
-- PERFECT SYNC appears when the user stays aligned through a strong phrase.
-- Levels 1–5 increase interval size, phrase density and tempo.
-- Local session rotation changes the phrase set without network access.
-- Result screen now shows Song Path, Pitch, Stability and Sync scores.
-- Local coach chooses the next priority from singing metrics.
-- Optional vibrato scan remains local and does not affect the main score.
+## Echo Recall loop
+1. Calibrate a comfortable center note.
+2. LISTEN: the app synthesizes a short melody entirely on-device.
+3. RECALL: the visual target disappears and the user sings the phrase from memory.
+4. DIAGNOSE: the app compares the attempt against each phrase segment.
+5. REPAIR: only the weakest local segment is replayed and practiced with the guide visible.
+6. Repeat across three phrases, then update the local voice-learning profile.
+
+## 0.4 additions
+- Offline melody synthesis with Android AudioTrack.
+- Hidden-target recall mode.
+- Per-step error analysis.
+- Automatic weakest-segment detection.
+- Focused repair loop using the difficult step plus one adjacent step.
+- Memory score.
+- Repair score.
+- Pitch and stability scores retained.
+- Levels 1–5 still adapt phrase complexity and tempo.
+- All data remains local.
 
 ## Privacy
 - No INTERNET permission.
-- Raw microphone audio is never stored or transmitted.
-- Voice profile, level and session metrics stay on the Android device.
+- Microphone audio is analyzed in memory and never uploaded.
+- Raw recordings are not stored.
+- Progress and metrics remain in Android SharedPreferences.
 
 ## AI strategy
-The critical loop remains deterministic and local.
-OpenAI remains reserved for a future opt-in generative coach, song decomposition and advanced explanations.
+The critical loop is still local DSP + adaptive logic.
+OpenAI remains reserved for future opt-in generative coaching, imported-song decomposition and advanced explanations.
