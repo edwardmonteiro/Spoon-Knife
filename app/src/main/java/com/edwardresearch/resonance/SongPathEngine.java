@@ -32,7 +32,7 @@ final class SongPathEngine {
     static SongPathEngine create(int level, int variant) {
         int l = Math.max(1, Math.min(5, level));
         int v = Math.abs(variant) % 3;
-        int bpm = 66 + l * 3;
+        int bpm = 64 + l * 3;
 
         Phrase[] set;
         if (l == 1) {
@@ -92,6 +92,10 @@ final class SongPathEngine {
         return phrases[Math.max(0, Math.min(phrases.length - 1, index))];
     }
 
+    int stepCount(int phraseIndex) {
+        return phrase(phraseIndex).steps.length;
+    }
+
     long beatMs(int phraseIndex) {
         return Math.round(60000.0 / phrase(phraseIndex).bpm);
     }
@@ -101,14 +105,52 @@ final class SongPathEngine {
     }
 
     long durationMs(int phraseIndex) {
+        return stepEndMs(phraseIndex, stepCount(phraseIndex) - 1);
+    }
+
+    long stepStartMs(int phraseIndex, int stepIndex) {
         Phrase phrase = phrase(phraseIndex);
+        int safe = Math.max(0, Math.min(phrase.steps.length, stepIndex));
         double beats = 0;
-        for (Step step : phrase.steps) beats += step.beats;
+        for (int i = 0; i < safe; i++) beats += phrase.steps[i].beats;
         return Math.round(beats * beatMs(phraseIndex));
+    }
+
+    long stepEndMs(int phraseIndex, int stepIndex) {
+        Phrase phrase = phrase(phraseIndex);
+        int safe = Math.max(0, Math.min(phrase.steps.length - 1, stepIndex));
+        return stepStartMs(phraseIndex, safe)
+                + Math.round(phrase.steps[safe].beats * beatMs(phraseIndex));
+    }
+
+    int stepIndexAt(int phraseIndex, long elapsedMs) {
+        Phrase phrase = phrase(phraseIndex);
+        if (elapsedMs <= 0) return 0;
+        for (int i = 0; i < phrase.steps.length; i++) {
+            if (elapsedMs < stepEndMs(phraseIndex, i)) return i;
+        }
+        return phrase.steps.length - 1;
+    }
+
+    long segmentDurationMs(int phraseIndex, int startStep, int endStep) {
+        int start = Math.max(0, startStep);
+        int end = Math.min(stepCount(phraseIndex) - 1, Math.max(start, endStep));
+        return stepEndMs(phraseIndex, end) - stepStartMs(phraseIndex, start);
     }
 
     double targetMidi(double baseMidi, int phraseIndex, long elapsedMs) {
         return baseMidi + targetOffset(phraseIndex, elapsedMs);
+    }
+
+    double targetMidiForSegment(
+            double baseMidi,
+            int phraseIndex,
+            int startStep,
+            long segmentElapsedMs) {
+        return targetMidi(
+                baseMidi,
+                phraseIndex,
+                stepStartMs(phraseIndex, startStep) + Math.max(0, segmentElapsedMs));
     }
 
     double targetOffset(int phraseIndex, long elapsedMs) {
