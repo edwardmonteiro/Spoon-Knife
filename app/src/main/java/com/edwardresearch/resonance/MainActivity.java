@@ -98,6 +98,7 @@ public final class MainActivity extends Activity {
             setClickable(true);
             stroke.setStyle(Paint.Style.STROKE);
             level = clampLevel(prefs.getInt("level",1));
+            plan = LocalCoachEngine.createPlan(prefs, level);
         }
 
         void startSession() {
@@ -127,7 +128,7 @@ public final class MainActivity extends Activity {
             trail.clear();
 
             message="Cante uma nota confortável. Sem força.";
-            coach=plan.rationale
+            coach=plan.rationale;
             moment="";
             stage=CALIBRATE;
             stageStartedAt=System.currentTimeMillis();
