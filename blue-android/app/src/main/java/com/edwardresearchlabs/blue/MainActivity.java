@@ -88,6 +88,7 @@ public class MainActivity extends Activity {
             try { recorder.release(); } catch (Exception ignored) {}
             recorder = null;
         }
+        if (blueView != null) blueView.stopCallAudio();
         super.onDestroy();
     }
 
@@ -214,11 +215,16 @@ public class MainActivity extends Activity {
         private static final int PHRASE = 5;
         private static final int RESULT = 6;
         private static final int FREE = 7;
+        private static final int CALL = 8;
 
         private static final int MODE_FULL = 0;
         private static final int MODE_BEND = 1;
-        private static final int MODE_PHRASE = 2;
+        private static final int MODE_CALL = 2;
         private static final int MODE_FREE = 3;
+
+        private static final int CALL_LISTEN = 0;
+        private static final int CALL_READY = 1;
+        private static final int CALL_RESPOND = 2;
 
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint linePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -230,6 +236,7 @@ public class MainActivity extends Activity {
         private final Typeface regular = Typeface.create("sans-serif", Typeface.NORMAL);
         private final Typeface serif = Typeface.create("serif", Typeface.NORMAL);
         private final SharedPreferences prefs;
+        private final BluesCallPlayer callPlayer = new BluesCallPlayer();
 
         private final Target plus4 = new Target("+4", "C5", "blow", 523.251, 520);
         private final Target minus4 = new Target("−4", "D5", "draw", 587.330, 520);
@@ -238,6 +245,9 @@ public class MainActivity extends Activity {
         private final Target minus3 = new Target("−3", "B4", "draw", 493.883, 220);
         private final Target plus4Phrase = new Target("+4", "C5", "blow", 523.251, 220);
         private final Target[] phrase = {minus2, minus3, plus4Phrase, minus3, minus2};
+        private final double[] callFrequencies = {
+                minus2.hz, minus3.hz, plus4Phrase.hz, minus3.hz, minus2.hz
+        };
 
         private final ArrayDeque<Float> trail = new ArrayDeque<>();
 
@@ -245,6 +255,12 @@ public class MainActivity extends Activity {
         private int activeMode = MODE_FULL;
         private int pendingMode = MODE_FULL;
         private int phraseIndex = 0;
+        private int callPhase = CALL_LISTEN;
+        private long responseStartedAt = 0;
+        private long currentNoteStartedAt = 0;
+        private long timingErrorSum = 0;
+        private int timingSamples = 0;
+        private int timingScore = 0;
 
         private long holdSince = 0;
         private long bendHoldSince = 0;
@@ -297,6 +313,7 @@ public class MainActivity extends Activity {
         }
 
         void goHome() {
+            stopCallAudio();
             screen = HOME;
             phraseIndex = 0;
             holdSince = 0;
@@ -306,6 +323,10 @@ public class MainActivity extends Activity {
             trail.clear();
             message = micReady ? "MIC READY" : (micDenied ? "MIC ACCESS REQUIRED" : "MIC STARTING");
             invalidate();
+        }
+
+        void stopCallAudio() {
+            callPlayer.stop();
         }
 
         void onMicStarted() {
@@ -337,8 +358,15 @@ public class MainActivity extends Activity {
             pendingMode = mode;
             resetMetrics();
             phraseIndex = 0;
+            callPhase = CALL_LISTEN;
+            responseStartedAt = 0;
+            currentNoteStartedAt = 0;
+            timingErrorSum = 0;
+            timingSamples = 0;
+            timingScore = 0;
             bendStarted = false;
             trail.clear();
+            stopCallAudio();
 
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 screen = CALIBRATE;
@@ -377,10 +405,10 @@ public class MainActivity extends Activity {
                 screen = BEND;
                 bendStarted = false;
                 message = "Start clean at −4.";
-            } else if (pendingMode == MODE_PHRASE) {
-                screen = PHRASE;
+            } else if (pendingMode == MODE_CALL) {
+                screen = CALL;
                 phraseIndex = 0;
-                message = "Five notes. No rush.";
+                beginCall();
             } else {
                 screen = FREE;
                 message = "Play anything.";
@@ -393,7 +421,7 @@ public class MainActivity extends Activity {
             if (screen == DRAW) return minus4;
             if (screen == SUSTAIN) return sustain4;
             if (screen == BEND) return minus4;
-            if (screen == PHRASE) return phrase[Math.min(phraseIndex, phrase.length - 1)];
+            if (screen == PHRASE || screen == CALL) return phrase[Math.min(phraseIndex, phrase.length - 1)];
             return plus4;
         }
 
@@ -403,6 +431,11 @@ public class MainActivity extends Activity {
             lastPitchAt = SystemClock.elapsedRealtime();
 
             if (screen == HOME || screen == RESULT) {
+                invalidate();
+                return;
+            }
+
+            if (screen == CALL && callPhase != CALL_RESPOND) {
                 invalidate();
                 return;
             }
@@ -431,6 +464,12 @@ public class MainActivity extends Activity {
                 return;
             }
 
+            if (screen == CALL) {
+                handleCallResponse(hz);
+                invalidate();
+                return;
+            }
+
             Target target = currentTarget();
             cents = PitchDetector.centsFromTarget(hz, target.hz);
             long now = SystemClock.elapsedRealtime();
@@ -452,6 +491,81 @@ public class MainActivity extends Activity {
                 }
             }
             invalidate();
+        }
+
+        private void beginCall() {
+            callPhase = CALL_LISTEN;
+            phraseIndex = 0;
+            holdSince = 0;
+            responseStartedAt = 0;
+            currentNoteStartedAt = 0;
+            trail.clear();
+            message = "LISTEN";
+
+            callPlayer.play(callFrequencies, 360, 105, () ->
+                    runOnUiThread(() -> {
+                        if (screen != CALL) return;
+                        callPhase = CALL_READY;
+                        message = "YOUR TURN";
+                        invalidate();
+                        postDelayed(() -> {
+                            if (screen != CALL || callPhase != CALL_READY) return;
+                            callPhase = CALL_RESPOND;
+                            responseStartedAt = SystemClock.elapsedRealtime();
+                            currentNoteStartedAt = responseStartedAt;
+                            phraseIndex = 0;
+                            message = "RESPOND";
+                            vibrate();
+                            invalidate();
+                        }, 420);
+                    })
+            );
+        }
+
+        private void replayCall() {
+            stopCallAudio();
+            resetMetrics();
+            phraseIndex = 0;
+            timingErrorSum = 0;
+            timingSamples = 0;
+            timingScore = 0;
+            beginCall();
+        }
+
+        private void handleCallResponse(double hz) {
+            if (phraseIndex >= phrase.length) return;
+
+            Target target = phrase[phraseIndex];
+            cents = PitchDetector.centsFromTarget(hz, target.hz);
+            inBand = Math.abs(cents) <= 45.0;
+            addTrail((float) cents);
+
+            if (Math.abs(cents) <= 140) registerMetrics(Math.abs(cents), cents);
+
+            long now = SystemClock.elapsedRealtime();
+            if (inBand) {
+                if (holdSince == 0) holdSince = now;
+
+                if (now - holdSince >= target.holdMs) {
+                    long actual = now - currentNoteStartedAt;
+                    long expected = 465L;
+                    timingErrorSum += Math.min(800L, Math.abs(actual - expected));
+                    timingSamples++;
+
+                    phraseIndex++;
+                    holdSince = 0;
+                    currentNoteStartedAt = now;
+                    vibrate();
+
+                    if (phraseIndex >= phrase.length) {
+                        finishSession();
+                    } else {
+                        message = "NEXT";
+                    }
+                }
+            } else {
+                holdSince = 0;
+            }
         }
 
         private void handleFree(double hz) {
@@ -531,9 +645,9 @@ public class MainActivity extends Activity {
                 bendStarted = false;
                 message = "Start clean at −4.";
             } else if (screen == BEND) {
-                screen = PHRASE;
+                screen = CALL;
                 phraseIndex = 0;
-                message = "Five notes. No rush.";
+                beginCall();
             }
         }
 
@@ -546,7 +660,21 @@ public class MainActivity extends Activity {
                     ? 0
                     : (int) Math.round(clamp(100.0 - (stabilityDeltaSum / stabilityFrames) * 2.10, 0, 100));
 
-            finalScore = (int) Math.round(pitchScore * 0.65 + steadyScore * 0.35);
+            timingScore = timingSamples == 0
+                    ? 0
+                    : (int) Math.round(clamp(
+                            100.0 - (timingErrorSum / (double) timingSamples) / 5.5,
+                            0,
+                            100
+                    ));
+
+            if (activeMode == MODE_CALL || screen == CALL) {
+                finalScore = (int) Math.round(
+                        pitchScore * 0.50 + steadyScore * 0.25 + timingScore * 0.25
+                );
+            } else {
+                finalScore = (int) Math.round(pitchScore * 0.65 + steadyScore * 0.35);
+            }
 
             if (finalScore > bestScore) {
                 bestScore = finalScore;
@@ -572,6 +700,9 @@ public class MainActivity extends Activity {
             pitchScore = 0;
             steadyScore = 0;
             finalScore = 0;
+            timingScore = 0;
+            timingErrorSum = 0;
+            timingSamples = 0;
         }
 
         private void restartCurrentMode() {
@@ -651,11 +782,11 @@ public class MainActivity extends Activity {
             float start = oy + dp(262);
             float row = dp(88);
             String[] number = {"01", "02", "03", "04"};
-            String[] title = {"PRACTICE", "BEND", "PHRASE", "FREE PLAY"};
+            String[] title = {"PRACTICE", "BEND", "CALL & RESPONSE", "FREE PLAY"};
             String[] sub = {
-                    "breath · draw · sustain · bend · phrase",
+                    "breath · draw · sustain · bend · response",
                     "lower pitch with control",
-                    "your first five-note blues lick",
+                    "listen · remember · answer",
                     "listen to every note"
             };
 
@@ -754,6 +885,79 @@ public class MainActivity extends Activity {
             return (int) Math.round(
                     clamp(100.0 - (stabilityDeltaSum / stabilityFrames) * 2.10, 0, 100)
             );
+        }
+
+        private void drawCall(Canvas c, float left, float right, float oy, float h) {
+            text(c, "BLUE", left, oy + dp(44), 10, 0xFFBDBDBD, 0.24f);
+            text(c, "MENU", right - dp(34), oy + dp(44), 8, 0xFF666666, 0.12f);
+
+            text(c, "CALL & RESPONSE", left, oy + dp(116), 8, 0xFF606060, 0.17f);
+
+            String title;
+            String sub;
+            if (callPhase == CALL_LISTEN) {
+                title = "Listen.";
+                sub = "BLUE plays first";
+            } else if (callPhase == CALL_READY) {
+                title = "Your turn.";
+                sub = "breathe · then answer";
+            } else {
+                title = phrase[Math.min(phraseIndex, phrase.length - 1)].tab;
+                sub = "respond · " + (phraseIndex + 1) + " / " + phrase.length;
+            }
+
+            hero(c, title, left, oy + dp(192), callPhase == CALL_RESPOND ? 58 : 44, 0xFFF0F0F0);
+            text(c, sub, left, oy + dp(222), 11, 0xFF777777, 0.01f);
+
+            float top = oy + dp(286);
+            float bottom = Math.min(oy + h - dp(250), oy + dp(520));
+            float cy = (top + bottom) / 2f;
+
+            line(c, left, cy, right, cy, 0xFF2A2A2A, 1f);
+
+            float gap = (right - left) / phrase.length;
+            for (int i = 0; i < phrase.length; i++) {
+                int color;
+                if (callPhase == CALL_LISTEN) {
+                    color = 0xFF686868;
+                } else if (callPhase == CALL_READY) {
+                    color = 0xFF454545;
+                } else {
+                    color = i < phraseIndex
+                            ? 0xFF626262
+                            : (i == phraseIndex ? 0xFFE7E7E7 : 0xFF343434);
+                }
+                float x = left + gap * i;
+                text(c, phrase[i].tab, x, cy - dp(28), 14, color, 0.01f);
+                if (callPhase == CALL_RESPOND && i == phraseIndex) {
+                    line(c, x, cy - dp(17), x + dp(21), cy - dp(17), 0xFFB2B2B2, 1f);
+                }
+            }
+
+            if (callPhase == CALL_RESPOND) {
+                drawTrail(c, left, right, top, bottom, false);
+                if (frequency > 0 && SystemClock.elapsedRealtime() - lastPitchAt < 500 && rms >= soundGate) {
+                    float normalized = (float) clamp(cents / 120.0, -1, 1);
+                    float y = cy - normalized * (bottom - top) * 0.42f;
+                    dotPaint.setColor(inBand ? 0xFFF4F4F4 : 0xFF8F8F8F);
+                    c.drawCircle(right - dp(9), y, dp(inBand ? 5f : 4f), dotPaint);
+                }
+            } else {
+                long t = SystemClock.elapsedRealtime();
+                float pulse = (float) ((Math.sin(t / 150.0) + 1.0) * 0.5);
+                dotPaint.setColor(0xFFB7B7B7);
+                c.drawCircle(left + (right - left) * (0.2f + 0.6f * pulse), cy, dp(3.5f), dotPaint);
+            }
+
+            float actionY = bottom + dp(34);
+            line(c, left, actionY, right, actionY, 0xFF171717, 1f);
+            text(c, callPhase == CALL_LISTEN ? "PLAYING CALL" :
+                            (callPhase == CALL_READY ? "GET READY" : "LISTENING"),
+                    left, actionY + dp(30), 8, 0xFF676767, 0.14f);
+            text(c, "REPLAY", right - dp(42), actionY + dp(30), 8, 0xFF777777, 0.14f);
+
+            drawMetrics(c, left, right, oy, h, true);
+            postInvalidateDelayed(32);
         }
 
         private void drawTraining(Canvas c, float left, float right, float oy, float h) {
@@ -936,8 +1140,13 @@ public class MainActivity extends Activity {
             text(c, "PITCH", left, y, 8, 0xFF5B5B5B, 0.14f);
             text(c, pitchScore + "%", left, y + dp(29), 17, 0xFFBDBDBD, 0);
 
-            text(c, "STEADY", left + third, y, 8, 0xFF5B5B5B, 0.14f);
-            text(c, steadyScore + "%", left + third, y + dp(29), 17, 0xFFBDBDBD, 0);
+            if (activeMode == MODE_CALL) {
+                text(c, "TIMING", left + third, y, 8, 0xFF5B5B5B, 0.14f);
+                text(c, timingScore + "%", left + third, y + dp(29), 17, 0xFFBDBDBD, 0);
+            } else {
+                text(c, "STEADY", left + third, y, 8, 0xFF5B5B5B, 0.14f);
+                text(c, steadyScore + "%", left + third, y + dp(29), 17, 0xFFBDBDBD, 0);
+            }
 
             text(c, "BEST", left + third * 2f, y, 8, 0xFF5B5B5B, 0.14f);
             text(c, String.valueOf(bestScore), left + third * 2f, y + dp(29), 17, 0xFFBDBDBD, 0);
@@ -967,6 +1176,8 @@ public class MainActivity extends Activity {
                 drawResult(c, left, right, oy, h);
             } else if (screen == FREE) {
                 drawFree(c, left, right, oy, h);
+            } else if (screen == CALL) {
+                drawCall(c, left, right, oy, h);
             } else {
                 drawTraining(c, left, right, oy, h);
             }
@@ -987,9 +1198,15 @@ public class MainActivity extends Activity {
                     int index = (int) ((y - start) / row);
                     if (index == 0) startMode(MODE_FULL);
                     else if (index == 1) startMode(MODE_BEND);
-                    else if (index == 2) startMode(MODE_PHRASE);
+                    else if (index == 2) startMode(MODE_CALL);
                     else startMode(MODE_FREE);
                 }
+                return true;
+            }
+
+            if (screen == CALL && y > oy + dp(500) && y < oy + h - dp(120)
+                    && x > getWidth() * 0.55f) {
+                replayCall();
                 return true;
             }
 
